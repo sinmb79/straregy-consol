@@ -10,8 +10,8 @@
 .env.*
 *.env
 
-# Database — 실거래 데이터 포함
-data/
+# Database / runtime data — 실거래 데이터 포함 (코드 아님)
+/data/
 *.db
 *.sqlite
 *.sqlite3
