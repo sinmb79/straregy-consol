@@ -36,6 +36,9 @@ env/
 *.log
 logs/
 
+# Cloudflare tunnel binary
+cloudflared.exe
+
 # OS / editor files
 .DS_Store
 Thumbs.db

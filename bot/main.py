@@ -41,6 +41,8 @@ import uvicorn
 from bot.config import get_config
 from bot.data.collector import BinanceCollector
 from bot.data.store import DataStore
+from bot.data.validation_dataset_loader import ValidationDatasetLoader
+from bot.data.validation_replay import ValidationReplaySession
 from bot.notifications.telegram import TelegramNotifier
 from bot.regime.detector import RegimeDetector
 from bot.strategies.manager import StrategyManager
@@ -111,6 +113,9 @@ class Engine:
         self._daily_reviewer: Optional[DailyReviewer] = None
         self._weekly_reviewer: Optional[WeeklyReviewer] = None
 
+        # Cloudflare Tunnel
+        self._tunnel = None
+
         self._running = False
         self._shutdown_event = asyncio.Event()
         self._last_balance_refresh: float = 0.0
@@ -126,6 +131,8 @@ class Engine:
         logger.info("22B Strategy Engine — Phase 3 (+ Phase 4 if available)")
         logger.info("System mode: %s", self._config.system_mode)
         logger.info("AI enabled: %s", getattr(self._config, "ai_enabled", False))
+        logger.info("Validation dataset mode: %s", self._config.validation_dataset_enabled)
+        logger.info("Validation replay mode: %s", self._config.validation_replay_enabled)
         logger.info("=" * 60)
 
         # 1. Database
@@ -133,15 +140,54 @@ class Engine:
 
         # 2. DataStore
         self._store = DataStore(conn)
-        self._store.set_system_mode(self._config.system_mode)
+
+        offline_validation_mode = self._config.validation_dataset_enabled
+        effective_mode = self._config.system_mode
+        if offline_validation_mode and effective_mode == "ACTIVE":
+            logger.warning(
+                "Validation dataset mode requested with SYSTEM_MODE=ACTIVE — forcing OBSERVE for safety."
+            )
+            effective_mode = "OBSERVE"
+        self._store.set_system_mode(effective_mode)
+
+        replay_session: Optional[ValidationReplaySession] = None
+        if offline_validation_mode:
+            loader = ValidationDatasetLoader(self._store, self._config.validation_dataset_root)
+            warmup_bars = (
+                self._config.validation_replay_warmup_bars
+                if self._config.validation_replay_enabled
+                else None
+            )
+            summary = await loader.load(warmup_bars=warmup_bars)
+            logger.info(
+                "Validation datasets loaded: files=%d candles=%d symbols=%d intervals=%d warmup=%d replay_remaining=%d",
+                summary.files_loaded,
+                summary.candles_loaded,
+                summary.symbols_loaded,
+                summary.intervals_loaded,
+                summary.warmup_bars_loaded,
+                summary.replay_bars_remaining,
+            )
+            if self._config.validation_replay_enabled:
+                replay_session = ValidationReplaySession(
+                    store=self._store,
+                    datasets=loader.get_replay_datasets(),
+                    warmup_bars=self._config.validation_replay_warmup_bars,
+                    step_delay_ms=self._config.validation_replay_step_delay_ms,
+                    max_steps=self._config.validation_replay_max_steps,
+                )
+            self._store.set_exchange_status(False)
 
         # 3. Telegram
         self._telegram = TelegramNotifier(self._config)
         await self._telegram.start()
 
         # 4. Collector
-        self._collector = BinanceCollector(self._config, self._store)
-        await self._collector.start()
+        if not offline_validation_mode:
+            self._collector = BinanceCollector(self._config, self._store)
+            await self._collector.start()
+        else:
+            logger.info("Offline validation dataset mode enabled — skipping live Binance collector startup.")
 
         # 5. Regime Detector
         self._detector = RegimeDetector(self._store)
@@ -168,25 +214,28 @@ class Engine:
         logger.info("RiskManager initialized.")
 
         # 10. Phase 3: Executor
-        self._executor = Executor(
-            config=self._config,
-            store=self._store,
-            state_machine=self._state_machine,
-            kill_switch=self._kill_switch,
-        )
-        await self._executor.start()
-        self._kill_switch.set_executor(self._executor)
-        logger.info("Executor initialized. Testnet=%s", self._config.binance_testnet)
+        if not offline_validation_mode:
+            self._executor = Executor(
+                config=self._config,
+                store=self._store,
+                state_machine=self._state_machine,
+                kill_switch=self._kill_switch,
+            )
+            await self._executor.start()
+            self._kill_switch.set_executor(self._executor)
+            logger.info("Executor initialized. Testnet=%s", self._config.binance_testnet)
 
-        # 11. Phase 3: Reconciler
-        self._reconciler = Reconciler(
-            store=self._store,
-            executor=self._executor,
-            kill_switch=self._kill_switch,
-            telegram=self._telegram,
-        )
-        self._reconciler.start()
-        logger.info("Reconciler started (interval=5min).")
+            # 11. Phase 3: Reconciler
+            self._reconciler = Reconciler(
+                store=self._store,
+                executor=self._executor,
+                kill_switch=self._kill_switch,
+                telegram=self._telegram,
+            )
+            self._reconciler.start()
+            logger.info("Reconciler started (interval=5min).")
+        else:
+            logger.info("Offline validation dataset mode enabled — executor/reconciler remain disabled.")
 
         # 12. Telegram: start command handler
         asyncio.create_task(
@@ -219,8 +268,12 @@ class Engine:
         # 15. Dashboard in a background thread
         self._start_dashboard_thread()
 
+        # 16. Cloudflare Tunnel (optional — TUNNEL_ENABLED=true 시 활성)
+        if getattr(self._config, "tunnel_enabled", False):
+            await self._start_tunnel()
+
         # Notify started
-        self._telegram.notify_system_started(self._config.system_mode)
+        self._telegram.notify_system_started(self._store.get_system_mode())
         self._running = True
 
         # Register OS signal handlers
@@ -232,7 +285,10 @@ class Engine:
                 pass  # Windows does not support add_signal_handler for all signals
 
         # Initial balance fetch
-        await self._refresh_balance()
+        if not offline_validation_mode:
+            await self._refresh_balance()
+        else:
+            logger.info("Offline validation dataset mode enabled — skipping initial live balance fetch.")
 
         logger.info(
             "Engine running. Dashboard: http://%s:%d",
@@ -240,7 +296,10 @@ class Engine:
         )
 
         # Main loop
-        await self._main_loop()
+        if replay_session is not None:
+            await self._run_validation_replay(replay_session)
+        else:
+            await self._main_loop()
 
     def _handle_signal(self) -> None:
         logger.info("Shutdown signal received.")
@@ -252,43 +311,7 @@ class Engine:
 
         while not self._shutdown_event.is_set():
             try:
-                # --- Regime detection ---
-                result = self._detector.detect()
-                new_regime = result["regime"]
-
-                if new_regime != last_regime:
-                    logger.info("Regime change: %s → %s", last_regime, new_regime)
-                    self._telegram.notify_regime_change(last_regime, new_regime, result)
-                    last_regime = new_regime
-
-                    # Phase 4: interpret regime change asynchronously via Claude
-                    if self._regime_interpreter is not None:
-                        asyncio.create_task(
-                            self._interpret_regime(result),
-                            name="regime_interpret",
-                        )
-
-                # Persist to store + broadcast to dashboard
-                await self._store.update_regime(result)
-
-                # --- Phase 2: Strategy evaluation ---
-                if self._strategy_manager is not None:
-                    try:
-                        signals = self._strategy_manager.run_all(result)
-                        if signals:
-                            actionable = [s for s in signals if s.action != "SKIP"]
-                            logger.info(
-                                "Strategy cycle complete: %d total, %d actionable",
-                                len(signals), len(actionable),
-                            )
-
-                            # --- Phase 3: Execute LIVE signals ---
-                            if (self._config.system_mode == "ACTIVE"
-                                    and not self._kill_switch.is_active):
-                                await self._execute_live_signals(actionable, result)
-
-                    except Exception as exc:
-                        logger.error("Strategy manager run_all error: %s", exc)
+                last_regime = await self._run_engine_cycle(last_regime)
 
                 # --- Phase 3: Periodic balance refresh ---
                 now = time.time()
@@ -307,6 +330,76 @@ class Engine:
                 pass  # normal — keep looping
 
         await self._shutdown()
+
+    async def _run_validation_replay(self, replay_session: ValidationReplaySession) -> None:
+        """Replay staged validation candles bar-by-bar for offline paper/regime evaluation."""
+        last_regime = "UNKNOWN"
+        logger.info(
+            "Starting validation replay: total_steps=%d warmup=%d delay_ms=%d",
+            replay_session.total_steps(),
+            self._config.validation_replay_warmup_bars,
+            self._config.validation_replay_step_delay_ms,
+        )
+
+        if replay_session.total_steps() == 0:
+            logger.info("Validation replay has no remaining bars after warmup; falling back to static offline loop.")
+            await self._main_loop()
+            return
+
+        while not self._shutdown_event.is_set():
+            bar = await replay_session.next_bar()
+            if bar is None:
+                logger.info("Validation replay complete.")
+                break
+
+            logger.info(
+                "[ValidationReplay] Step %d/%d %s %s ts=%d close=%.8f",
+                bar.step_index,
+                bar.total_steps,
+                bar.symbol,
+                bar.interval,
+                bar.candle["ts"],
+                bar.candle["c"],
+            )
+            last_regime = await self._run_engine_cycle(last_regime)
+
+        await self._shutdown()
+
+    async def _run_engine_cycle(self, last_regime: str) -> str:
+        result = self._detector.detect()
+        new_regime = result["regime"]
+
+        if new_regime != last_regime:
+            logger.info("Regime change: %s → %s", last_regime, new_regime)
+            self._telegram.notify_regime_change(last_regime, new_regime, result)
+            last_regime = new_regime
+
+            if self._regime_interpreter is not None:
+                asyncio.create_task(
+                    self._interpret_regime(result),
+                    name="regime_interpret",
+                )
+
+        await self._store.update_regime(result)
+
+        if self._strategy_manager is not None:
+            try:
+                signals = self._strategy_manager.run_all(result)
+                if signals:
+                    actionable = [s for s in signals if s.action != "SKIP"]
+                    logger.info(
+                        "Strategy cycle complete: %d total, %d actionable",
+                        len(signals), len(actionable),
+                    )
+
+                    if (self._store.get_system_mode() == "ACTIVE"
+                            and not self._kill_switch.is_active):
+                        await self._execute_live_signals(actionable, result)
+
+            except Exception as exc:
+                logger.error("Strategy manager run_all error: %s", exc)
+
+        return last_regime
 
     async def _execute_live_signals(self, signals, regime: dict) -> None:
         """
@@ -441,8 +534,35 @@ class Engine:
                     logger.debug("[Telegram] Command loop error: %s", exc)
                     await asyncio.sleep(5)
 
+    async def _start_tunnel(self) -> None:
+        """Cloudflare Quick Tunnel을 시작하고 URL을 텔레그램으로 알림."""
+        from bot.tunnel import CloudflareTunnel
+
+        async def _on_url_ready(url: str) -> None:
+            logger.info("[Tunnel] Dashboard URL: %s", url)
+            msg = (
+                f"*📱 모바일 대시보드 접속 URL*\n"
+                f"`{url}`\n\n"
+                f"이 URL로 어디서든 대시보드에 접속할 수 있습니다.\n"
+                f"_(재시작 시 URL이 변경됩니다)_"
+            )
+            await self._telegram.send_message(msg)
+
+        exe = getattr(self._config, "tunnel_cloudflared_path", "./cloudflared.exe")
+        port = self._config.dashboard_port
+
+        self._tunnel = CloudflareTunnel(
+            cloudflared_path=exe,
+            local_port=port,
+            on_url_ready=_on_url_ready,
+        )
+        self._tunnel.start()
+        logger.info("[Tunnel] Cloudflare tunnel starting (port=%d)…", port)
+
     async def _shutdown(self) -> None:
         logger.info("Shutting down Engine …")
+        if self._tunnel:
+            await self._tunnel.stop()
         if self._reconciler:
             self._reconciler.stop()
         if self._executor:

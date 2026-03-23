@@ -3,10 +3,11 @@ Configuration loader for the 22B Strategy Engine.
 All settings are read from environment variables (loaded from .env).
 """
 
-import os
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import List
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -42,10 +43,6 @@ def _get_list(key: str, default: str = "") -> List[str]:
     return [s.strip() for s in raw.split(",") if s.strip()]
 
 
-# --------------------------------------------------------------------------- #
-# Config dataclass
-# --------------------------------------------------------------------------- #
-
 @dataclass
 class Config:
     # Binance Testnet
@@ -53,7 +50,7 @@ class Config:
     binance_api_secret: str = field(default_factory=lambda: _get("BINANCE_API_SECRET"))
     binance_testnet: bool = field(default_factory=lambda: _get_bool("BINANCE_TESTNET", True))
 
-    # Binance Mainnet (실전매매 — BINANCE_TESTNET=false 시 자동 사용)
+    # Binance Mainnet
     binance_mainnet_api_key: str = field(default_factory=lambda: _get("BINANCE_MAINNET_API_KEY"))
     binance_mainnet_api_secret: str = field(default_factory=lambda: _get("BINANCE_MAINNET_API_SECRET"))
 
@@ -80,13 +77,38 @@ class Config:
     system_mode: str = field(default_factory=lambda: _get("SYSTEM_MODE", "OBSERVE"))
     log_level: str = field(default_factory=lambda: _get("LOG_LEVEL", "INFO"))
 
+    # Offline / validation dataset mode
+    validation_dataset_enabled: bool = field(default_factory=lambda: _get_bool("VALIDATION_DATASET_ENABLED", False))
+    validation_dataset_root: str = field(default_factory=lambda: _get(
+        "VALIDATION_DATASET_ROOT",
+        "./data/import_staging/validation_datasets",
+    ))
+    validation_replay_enabled: bool = field(
+        default_factory=lambda: _get_bool("VALIDATION_REPLAY_ENABLED", False)
+    )
+    validation_replay_warmup_bars: int = field(
+        default_factory=lambda: _get_int("VALIDATION_REPLAY_WARMUP_BARS", 52)
+    )
+    validation_replay_step_delay_ms: int = field(
+        default_factory=lambda: _get_int("VALIDATION_REPLAY_STEP_DELAY_MS", 0)
+    )
+    validation_replay_max_steps: int = field(
+        default_factory=lambda: _get_int("VALIDATION_REPLAY_MAX_STEPS", 0)
+    )
+
+    # Cloudflare Tunnel
+    tunnel_enabled: bool = field(default_factory=lambda: _get_bool("TUNNEL_ENABLED", False))
+    tunnel_cloudflared_path: str = field(
+        default_factory=lambda: _get("TUNNEL_CLOUDFLARED_PATH", "./cloudflared.exe")
+    )
+
     # OpenClaw AI (Phase 4)
     openclaw_base_url: str = field(default_factory=lambda: _get("OPENCLAW_BASE_URL", "http://127.0.0.1:18789"))
-    openclaw_token: str    = field(default_factory=lambda: _get("OPENCLAW_TOKEN", ""))
+    openclaw_token: str = field(default_factory=lambda: _get("OPENCLAW_TOKEN", ""))
     openclaw_agent_id: str = field(default_factory=lambda: _get("OPENCLAW_AGENT_ID", "main"))
-    weekly_review_day: int = field(default_factory=lambda: _get_int("WEEKLY_REVIEW_DAY", 6))   # 0=Mon, 6=Sun
-    weekly_review_hour: int = field(default_factory=lambda: _get_int("WEEKLY_REVIEW_HOUR", 0))  # UTC
-    daily_review_hour: int = field(default_factory=lambda: _get_int("DAILY_REVIEW_HOUR", 22))   # UTC
+    weekly_review_day: int = field(default_factory=lambda: _get_int("WEEKLY_REVIEW_DAY", 6))
+    weekly_review_hour: int = field(default_factory=lambda: _get_int("WEEKLY_REVIEW_HOUR", 0))
+    daily_review_hour: int = field(default_factory=lambda: _get_int("DAILY_REVIEW_HOUR", 22))
     ai_enabled: bool = field(default_factory=lambda: _get_bool("AI_ENABLED", True))
 
     # Symbols
@@ -103,7 +125,6 @@ class Config:
     )
     candle_limit: int = field(default_factory=lambda: _get_int("CANDLE_LIMIT", 200))
 
-    # Binance base URLs
     @property
     def binance_rest_base(self) -> str:
         if self.binance_testnet:
@@ -118,7 +139,6 @@ class Config:
 
     @property
     def active_binance_api_key(self) -> str:
-        """Returns mainnet key when testnet=false, testnet key otherwise."""
         if not self.binance_testnet and self.binance_mainnet_api_key:
             return self.binance_mainnet_api_key
         return self.binance_api_key
@@ -130,20 +150,44 @@ class Config:
         return self.binance_api_secret
 
     def validate(self) -> None:
-        """Log warnings for missing critical config values."""
         if not self.binance_api_key:
             logger.warning("BINANCE_API_KEY is not set")
         if not self.telegram_bot_token:
-            logger.warning("TELEGRAM_BOT_TOKEN is not set — Telegram alerts disabled")
+            logger.warning("TELEGRAM_BOT_TOKEN is not set; Telegram alerts disabled")
+
         valid_modes = {"ACTIVE", "LIMITED", "OBSERVE", "BLOCKED"}
         if self.system_mode not in valid_modes:
             logger.warning(
-                "SYSTEM_MODE '%s' is not valid; falling back to OBSERVE", self.system_mode
+                "SYSTEM_MODE '%s' is not valid; falling back to OBSERVE",
+                self.system_mode,
             )
             self.system_mode = "OBSERVE"
 
+        if self.validation_replay_enabled and not self.validation_dataset_enabled:
+            logger.warning(
+                "VALIDATION_REPLAY_ENABLED requires VALIDATION_DATASET_ENABLED=true; disabling replay"
+            )
+            self.validation_replay_enabled = False
 
-# Singleton instance
+        if self.validation_replay_warmup_bars < 0:
+            logger.warning(
+                "VALIDATION_REPLAY_WARMUP_BARS must be >= 0; falling back to 52"
+            )
+            self.validation_replay_warmup_bars = 52
+
+        if self.validation_replay_step_delay_ms < 0:
+            logger.warning(
+                "VALIDATION_REPLAY_STEP_DELAY_MS must be >= 0; falling back to 0"
+            )
+            self.validation_replay_step_delay_ms = 0
+
+        if self.validation_replay_max_steps < 0:
+            logger.warning(
+                "VALIDATION_REPLAY_MAX_STEPS must be >= 0; falling back to 0"
+            )
+            self.validation_replay_max_steps = 0
+
+
 _config: Config | None = None
 
 
