@@ -1700,6 +1700,120 @@ async function loadSystemHealth() {
   }
 }
 
+// ============================================================
+// Settings Panel
+// ============================================================
+
+let _currentSymbols = [];
+
+async function loadSettings() {
+  try {
+    const r = await fetch('/api/settings');
+    if (!r.ok) return;
+    const d = await r.json();
+
+    // Mode buttons
+    ['OBSERVE','LIMITED','ACTIVE','BLOCKED'].forEach(m => {
+      const btn = document.getElementById('mode-btn-' + m);
+      if (!btn) return;
+      btn.classList.toggle('mode-btn-active', d.system_mode === m);
+    });
+
+    // Kill switch status
+    const ksLine = document.getElementById('ks-status-line');
+    if (ksLine) {
+      ksLine.textContent = d.kill_switch ? '🔴 현재 활성 — 신규 진입 차단 중' : '🟢 해제 상태';
+      ksLine.style.color = d.kill_switch ? 'var(--red)' : 'var(--green)';
+    }
+
+    // AI toggle
+    const aiBox = document.getElementById('toggle-ai');
+    const aiTxt = document.getElementById('toggle-ai-text');
+    if (aiBox) aiBox.checked = d.ai_enabled;
+    if (aiTxt) aiTxt.textContent = d.ai_enabled ? 'ON' : 'OFF';
+
+    // Symbols
+    _currentSymbols = d.tracked_symbols || [];
+    renderSymbolTags();
+  } catch (e) {}
+}
+
+function renderSymbolTags() {
+  const wrap = document.getElementById('symbol-tags');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+  _currentSymbols.forEach(sym => {
+    const tag = document.createElement('span');
+    tag.className = 'symbol-tag';
+    tag.textContent = sym;
+    tag.title = '클릭하여 제거';
+    tag.onclick = () => {
+      _currentSymbols = _currentSymbols.filter(s => s !== sym);
+      renderSymbolTags();
+    };
+    wrap.appendChild(tag);
+  });
+}
+
+function addSymbol() {
+  const inp = document.getElementById('symbol-input');
+  if (!inp) return;
+  const sym = inp.value.trim().toUpperCase();
+  if (!sym) return;
+  if (!_currentSymbols.includes(sym)) {
+    _currentSymbols.push(sym);
+    renderSymbolTags();
+  }
+  inp.value = '';
+}
+
+async function saveSymbols() {
+  await applySetting({ tracked_symbols: _currentSymbols }, '심볼 저장됨');
+}
+
+async function setMode(mode) {
+  await applySetting({ system_mode: mode }, `모드 변경: ${mode}`);
+  await loadSettings();
+}
+
+async function triggerKillSwitch(active) {
+  const msg = active ? '🚨 Kill Switch를 활성화합니까?' : '✅ Kill Switch를 해제합니까?';
+  if (!confirm(msg)) return;
+  await applySetting({ kill_switch: active }, active ? 'Kill Switch 활성화' : 'Kill Switch 해제');
+  await loadSettings();
+}
+
+async function setAI(enabled) {
+  const aiTxt = document.getElementById('toggle-ai-text');
+  if (aiTxt) aiTxt.textContent = enabled ? 'ON' : 'OFF';
+  await applySetting({ ai_enabled: enabled }, `AI 분석 ${enabled ? '활성화' : '비활성화'}`);
+}
+
+async function applySetting(body, successMsg) {
+  const statusEl = document.getElementById('settings-save-status');
+  try {
+    const r = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (r.ok) {
+      showToast('success', '설정 저장', successMsg, 2500);
+      if (statusEl) { statusEl.textContent = '✓ 저장됨'; statusEl.style.color = 'var(--green)'; }
+      setTimeout(() => { if (statusEl) statusEl.textContent = ''; }, 3000);
+    } else {
+      const err = await r.json().catch(() => ({}));
+      showToast('error', '설정 오류', err.detail || '저장 실패', 3000);
+    }
+  } catch (e) {
+    showToast('error', '네트워크 오류', e.message, 3000);
+  }
+}
+
+// Settings 초기 로드 및 주기적 갱신
+loadSettings();
+setInterval(loadSettings, 15000);
+
 async function confirmRestart() {
   document.getElementById('restart-modal').style.display = 'none';
   showToast('success', 'Restarting', 'Bot process will restart in ~2s…', 3000);

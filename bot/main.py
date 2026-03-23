@@ -525,12 +525,61 @@ class Engine:
         offset = 0
         base = f"https://api.telegram.org/bot{self._telegram._token}"
 
+        async def send_control_menu(chat_id_target: int) -> None:
+            """인라인 키보드 컨트롤박스 전송."""
+            mode = self._store.get_system_mode() if self._store else "OBSERVE"
+            ks   = self._kill_switch.is_active if self._kill_switch else False
+            net  = "테스트넷" if self._config.binance_testnet else "실전"
+            keyboard = {
+                "inline_keyboard": [
+                    [
+                        {"text": "📊 상태",    "callback_data": "cmd:status"},
+                        {"text": "💰 잔고",    "callback_data": "cmd:balance"},
+                        {"text": "📂 포지션",  "callback_data": "cmd:positions"},
+                    ],
+                    [
+                        {"text": "🌐 시장국면", "callback_data": "cmd:regime"},
+                        {"text": "🧠 전략성과", "callback_data": "cmd:strategies"},
+                        {"text": "📱 URL",     "callback_data": "cmd:url"},
+                    ],
+                    [
+                        {"text": f"{'🔴' if mode=='OBSERVE' else '⚪'} OBSERVE",  "callback_data": "mode:OBSERVE"},
+                        {"text": f"{'🔴' if mode=='LIMITED' else '⚪'} LIMITED",  "callback_data": "mode:LIMITED"},
+                        {"text": f"{'🔴' if mode=='ACTIVE'  else '⚪'} ACTIVE",   "callback_data": "mode:ACTIVE"},
+                    ],
+                    [
+                        {"text": f"🚨 Kill Switch {'[ON]' if ks else ''}",  "callback_data": "cmd:kill"},
+                        {"text": "✅ Kill Reset",  "callback_data": "cmd:reset"},
+                        {"text": "🔄 재시작",     "callback_data": "cmd:restart"},
+                    ],
+                ]
+            }
+            try:
+                await client.post(f"{base}/sendMessage", json={
+                    "chat_id":      chat_id_target,
+                    "text":         f"*🎛 22B Control Panel*\n현재 모드: `{mode}` | 네트워크: `{net}`\nKill Switch: `{'🔴 활성' if ks else '🟢 해제'}`",
+                    "parse_mode":   "Markdown",
+                    "reply_markup": keyboard,
+                })
+            except Exception as exc:
+                logger.warning("[Telegram] send_control_menu error: %s", exc)
+
+        async def answer_callback(callback_query_id: str, text: str = "") -> None:
+            try:
+                await client.post(f"{base}/answerCallbackQuery", json={
+                    "callback_query_id": callback_query_id,
+                    "text":              text,
+                    "show_alert":        False,
+                })
+            except Exception:
+                pass
+
         async with httpx.AsyncClient(timeout=35.0) as client:
             while not self._shutdown_event.is_set():
                 try:
                     resp = await client.get(
                         f"{base}/getUpdates",
-                        params={"offset": offset, "timeout": 30, "allowed_updates": ["message"]},
+                        params={"offset": offset, "timeout": 30, "allowed_updates": ["message", "callback_query"]},
                     )
                     if resp.status_code == 404:
                         logger.warning("[Telegram] Invalid token (404) — command loop disabled.")
@@ -542,34 +591,148 @@ class Engine:
                     data = resp.json()
                     for update in data.get("result", []):
                         offset = update["update_id"] + 1
+
+                        # ── callback_query (인라인 버튼 클릭) ────────────
+                        cq = update.get("callback_query")
+                        if cq:
+                            cq_id   = cq["id"]
+                            cq_data = cq.get("data", "")
+                            cq_chat = cq.get("message", {}).get("chat", {}).get("id")
+
+                            if cq_data.startswith("mode:"):
+                                new_mode = cq_data.split(":", 1)[1]
+                                self._config.system_mode = new_mode
+                                self._store.set_system_mode(new_mode)
+                                logger.warning("[Telegram] Mode changed to %s via inline button", new_mode)
+                                await answer_callback(cq_id, f"모드 변경: {new_mode}")
+                                await self._telegram.send_message(f"✅ 운영 모드 변경: `{new_mode}`")
+                                await send_control_menu(cq_chat)
+
+                            elif cq_data == "cmd:status":
+                                await answer_callback(cq_id)
+                                # status 처리 — 아래 /status 로직 재사용
+                                ks      = self._kill_switch.get_status() if self._kill_switch else {}
+                                rec     = self._reconciler.get_status() if self._reconciler else {}
+                                balance = self._store.get_account_balance()
+                                mode    = self._store.get_system_mode()
+                                uptime  = int(time.time() - self._start_time)
+                                h, m_u  = divmod(uptime // 60, 60)
+                                regime  = (self._store.get_regime() or {}).get("regime", "UNKNOWN")
+                                tunnel_url = self._tunnel.url if self._tunnel else None
+                                await self._telegram.send_message(
+                                    f"*⚙️ 22B Engine 상태*\n\n"
+                                    f"운영 모드: `{mode}`\n"
+                                    f"시장 국면: `{regime}`\n"
+                                    f"잔고: `{balance:.2f} USDT`\n"
+                                    f"Kill Switch: `{'🔴 활성' if ks.get('active') else '🟢 해제'}`\n"
+                                    f"업타임: `{h}시간 {m_u}분`\n"
+                                    + (f"대시보드: {tunnel_url}" if tunnel_url else "")
+                                )
+
+                            elif cq_data == "cmd:balance":
+                                await answer_callback(cq_id)
+                                balance  = self._store.get_account_balance()
+                                dpnl, dp = self._store.get_daily_pnl()
+                                wpnl     = self._store.get_weekly_pnl()
+                                sign_d   = "+" if dpnl >= 0 else ""
+                                sign_w   = "+" if wpnl >= 0 else ""
+                                net_str  = "테스트넷" if self._config.binance_testnet else "실전"
+                                await self._telegram.send_message(
+                                    f"*💰 잔고 현황* ({net_str})\n\n"
+                                    f"잔고: `{balance:.2f} USDT`\n"
+                                    f"오늘 손익: `{sign_d}{dpnl:.2f} USDT ({sign_d}{dp:.2f}%)`\n"
+                                    f"이번 주 손익: `{sign_w}{wpnl:.2f} USDT`"
+                                )
+
+                            elif cq_data == "cmd:positions":
+                                await answer_callback(cq_id)
+                                paper = self._store.get_open_paper_positions()
+                                live  = self._store.get_open_live_positions()
+                                if not paper and not live:
+                                    await self._telegram.send_message("📂 현재 열린 포지션이 없습니다.")
+                                else:
+                                    lines = ["*📂 열린 포지션*\n"]
+                                    for p in live:
+                                        lines.append(f"🔴 LIVE `{p.get('symbol')}` {p.get('side')} PnL:`{p.get('pnl_pct',0):.2f}%`")
+                                    for p in paper:
+                                        lines.append(f"📄 PAPER `{p.get('symbol')}` {p.get('side')} 전략:`{p.get('strategy','—')}`")
+                                    await self._telegram.send_message("\n".join(lines))
+
+                            elif cq_data == "cmd:regime":
+                                await answer_callback(cq_id)
+                                r = self._store.get_regime() or {}
+                                await self._telegram.send_message(
+                                    f"*🌐 시장 국면*\n\n"
+                                    f"현재: `{r.get('regime','UNKNOWN')}`\n"
+                                    f"활성 전략: `{', '.join(r.get('allowed_strategies',[])) or '없음'}`\n"
+                                    f"BTC 가격: `{r.get('btc_price','—')}`\n"
+                                    f"RSI(4H): `{r.get('btc_rsi','—')}`"
+                                )
+
+                            elif cq_data == "cmd:strategies":
+                                await answer_callback(cq_id)
+                                strategies = self._strategy_manager.get_strategy_list() if self._strategy_manager else []
+                                stats      = self._store.get_strategy_stats()
+                                lines = ["*🧠 전략 성과*\n"]
+                                for s in strategies:
+                                    name = s["name"]
+                                    st   = stats.get(name, {})
+                                    lines.append(f"`{name}` [{s.get('mode','—')}] 승률:{st.get('win_rate',0):.1f}% 거래:{st.get('trade_count',0)}회")
+                                await self._telegram.send_message("\n".join(lines) if lines else "전략 없음")
+
+                            elif cq_data == "cmd:url":
+                                await answer_callback(cq_id)
+                                url = self._tunnel.url if self._tunnel else None
+                                await self._telegram.send_message(
+                                    f"*📱 대시보드 URL*\n`{url}`" if url else "터널이 비활성화 상태입니다."
+                                )
+
+                            elif cq_data == "cmd:kill":
+                                await answer_callback(cq_id, "Kill Switch 활성화")
+                                await self._kill_switch.trigger(
+                                    reason="Inline button /kill via Telegram",
+                                    triggered_by=f"telegram:{cq_chat}",
+                                )
+                                await self._telegram.send_message(
+                                    "🚨 *Kill Switch 활성화*\n모든 신규 진입 차단됨.\n해제: ✅ Kill Reset 버튼"
+                                )
+                                await send_control_menu(cq_chat)
+
+                            elif cq_data == "cmd:reset":
+                                if self._kill_switch and self._kill_switch.is_active:
+                                    self._kill_switch.reset(authorized_by=f"telegram:{cq_chat}")
+                                    await answer_callback(cq_id, "Kill Switch 해제됨")
+                                    await self._telegram.send_message("✅ *Kill Switch 해제됨*\n정상 운영으로 복귀합니다.")
+                                    await send_control_menu(cq_chat)
+                                else:
+                                    await answer_callback(cq_id, "Kill Switch가 활성화되어 있지 않음")
+
+                            elif cq_data == "cmd:restart":
+                                await answer_callback(cq_id, "재시작 중...")
+                                await self._telegram.send_message("🔄 *봇을 재시작합니다...*\n약 10초 후 다시 시작됩니다.")
+                                base_dir = str(__import__("pathlib").Path(__file__).parent.parent)
+                                def _do_restart_cb():
+                                    time.sleep(2)
+                                    subprocess.Popen(
+                                        [sys.executable, "-m", "bot.main"],
+                                        cwd=base_dir,
+                                        creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+                                    )
+                                    time.sleep(0.5)
+                                    os._exit(0)
+                                __import__("threading").Thread(target=_do_restart_cb, daemon=True).start()
+
+                            continue  # callback_query 처리 완료, message 처리 건너뜀
+
                         msg    = update.get("message", {})
                         raw    = (msg.get("text") or "").strip()
                         text   = raw.lower()
                         chat_id = msg.get("chat", {}).get("id")
                         parts  = raw.split()          # 원본 대소문자 유지
 
-                        # ── /help ─────────────────────────────────────────
-                        if text in ("/help", "/start"):
-                            await self._telegram.send_message(
-                                "*📋 22B Strategy Engine 명령어 목록*\n\n"
-                                "*상태 조회*\n"
-                                "`/status`  — 전체 시스템 상태\n"
-                                "`/balance` — 잔고 및 오늘/이번 주 손익\n"
-                                "`/regime`  — 현재 시장 국면\n"
-                                "`/positions` — 열린 포지션 현황\n"
-                                "`/strategies` — 전략별 성과\n"
-                                "`/url`     — 모바일 대시보드 URL\n\n"
-                                "*시스템 제어*\n"
-                                "`/kill`    — 🚨 긴급 정지 (신규 진입 전면 차단)\n"
-                                "`/reset`   — Kill Switch 해제\n"
-                                "`/mode`    — 현재 운영 모드 확인\n"
-                                "`/mode observe` — 관찰 모드 (거래 없음)\n"
-                                "`/mode limited` — 페이퍼 트레이딩만\n"
-                                "`/mode active`  — 실전 매매 활성화\n"
-                                "`/pause [전략명]` — 전략 일시정지\n"
-                                "`/resume [전략명]` — 전략 재개\n"
-                                "`/restart` — 봇 재시작"
-                            )
+                        # ── /start /menu /help ────────────────────────────
+                        if text in ("/help", "/start", "/menu"):
+                            await send_control_menu(chat_id)
 
                         # ── /kill ─────────────────────────────────────────
                         elif text == "/kill":

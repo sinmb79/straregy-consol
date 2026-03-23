@@ -651,6 +651,84 @@ def create_app(
         return JSONResponse({"status": "restarting", "message": "Bot will restart in ~2s"})
 
     # ------------------------------------------------------------------ #
+    # Settings (read + write)
+    # ------------------------------------------------------------------ #
+
+    @app.get("/api/settings")
+    async def api_get_settings():
+        """Return current runtime settings."""
+        cfg = engine._config if engine is not None else None
+        store = engine._store if engine is not None else None
+        return JSONResponse({
+            "system_mode":     store.get_system_mode() if store else (cfg.system_mode if cfg else "OBSERVE"),
+            "testnet":         cfg.binance_testnet if cfg else True,
+            "tracked_symbols": cfg.tracked_symbols if cfg else [],
+            "candle_intervals": cfg.candle_intervals if cfg else ["1h", "4h"],
+            "ai_enabled":      getattr(cfg, "ai_enabled", True) if cfg else True,
+            "kill_switch":     engine._kill_switch.is_active if (engine and engine._kill_switch) else False,
+        })
+
+    @app.post("/api/settings")
+    async def api_post_settings(request: Request):
+        """
+        Update runtime settings without restart.
+
+        Accepted fields (all optional):
+          system_mode   : "OBSERVE" | "LIMITED" | "ACTIVE" | "BLOCKED"
+          ai_enabled    : bool
+          kill_switch   : bool (true = trigger, false = reset)
+          tracked_symbols : list[str]
+        """
+        if engine is None:
+            raise HTTPException(status_code=503, detail="Engine not running")
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+        changed = []
+
+        # --- system_mode ---
+        if "system_mode" in body:
+            new_mode = str(body["system_mode"]).upper()
+            valid = {"OBSERVE", "LIMITED", "ACTIVE", "BLOCKED"}
+            if new_mode not in valid:
+                raise HTTPException(status_code=400, detail=f"Invalid system_mode. Must be one of {valid}")
+            engine._config.system_mode = new_mode
+            engine._store.set_system_mode(new_mode)
+            changed.append(f"system_mode={new_mode}")
+            logger.info("[Dashboard/Settings] system_mode changed to %s", new_mode)
+
+        # --- ai_enabled ---
+        if "ai_enabled" in body:
+            val = bool(body["ai_enabled"])
+            engine._config.ai_enabled = val
+            changed.append(f"ai_enabled={val}")
+            logger.info("[Dashboard/Settings] ai_enabled changed to %s", val)
+
+        # --- kill_switch ---
+        if "kill_switch" in body and engine._kill_switch is not None:
+            if body["kill_switch"]:
+                await engine._kill_switch.trigger(
+                    reason="Dashboard settings panel",
+                    triggered_by="dashboard",
+                )
+                changed.append("kill_switch=triggered")
+            else:
+                engine._kill_switch.reset(authorized_by="dashboard")
+                changed.append("kill_switch=reset")
+
+        # --- tracked_symbols ---
+        if "tracked_symbols" in body:
+            syms = [str(s).upper().strip() for s in body["tracked_symbols"] if str(s).strip()]
+            if syms:
+                engine._config.tracked_symbols = syms
+                changed.append(f"tracked_symbols={syms}")
+                logger.info("[Dashboard/Settings] tracked_symbols changed to %s", syms)
+
+        return JSONResponse({"ok": True, "changed": changed})
+
+    # ------------------------------------------------------------------ #
     # Backtest report
     # ------------------------------------------------------------------ #
 

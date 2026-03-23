@@ -640,6 +640,83 @@
 
   </div>
 
+
+  <!-- -------------------------------------------------------- -->
+  <!-- SETTINGS PANEL                                            -->
+  <!-- -------------------------------------------------------- -->
+  <div class="panel" id="panel-settings" style="margin-top:20px">
+    <div class="panel-header">
+      <span class="panel-title">
+        <span class="panel-title-icon">⚙️</span>
+        Settings
+      </span>
+      <span class="panel-subtitle" id="settings-save-status"></span>
+    </div>
+
+    <div class="settings-body">
+
+      <!-- ── 매매 모드 ── -->
+      <div class="settings-row">
+        <div class="settings-label">매매 모드</div>
+        <div class="settings-controls">
+          <button class="mode-btn" id="mode-btn-OBSERVE"  onclick="setMode('OBSERVE')">OBSERVE</button>
+          <button class="mode-btn" id="mode-btn-LIMITED"  onclick="setMode('LIMITED')">LIMITED</button>
+          <button class="mode-btn" id="mode-btn-ACTIVE"   onclick="setMode('ACTIVE')">ACTIVE</button>
+          <button class="mode-btn" id="mode-btn-BLOCKED"  onclick="setMode('BLOCKED')">BLOCKED</button>
+        </div>
+        <div class="settings-desc">
+          <b>OBSERVE</b> — 관찰만 (거래 없음) &nbsp;|&nbsp;
+          <b>LIMITED</b> — 페이퍼 트레이딩만 &nbsp;|&nbsp;
+          <b>ACTIVE</b> — 실전 매매 활성 &nbsp;|&nbsp;
+          <b>BLOCKED</b> — 전체 차단
+        </div>
+      </div>
+
+      <!-- ── Kill Switch ── -->
+      <div class="settings-row">
+        <div class="settings-label">Kill Switch</div>
+        <div class="settings-controls">
+          <button class="mode-btn mode-btn-danger" onclick="triggerKillSwitch(true)">🚨 긴급 정지</button>
+          <button class="mode-btn mode-btn-safe"   onclick="triggerKillSwitch(false)">✅ 해제</button>
+        </div>
+        <div class="settings-desc" id="ks-status-line">—</div>
+      </div>
+
+      <!-- ── AI 분석 ── -->
+      <div class="settings-row">
+        <div class="settings-label">AI 분석</div>
+        <div class="settings-controls">
+          <label class="toggle-label">
+            <input type="checkbox" id="toggle-ai" onchange="setAI(this.checked)" />
+            <span class="toggle-slider"></span>
+            <span id="toggle-ai-text" style="margin-left:8px;font-size:13px">—</span>
+          </label>
+        </div>
+        <div class="settings-desc">OpenClaw AI 분석 활성화 여부 (거래 실행과 무관)</div>
+      </div>
+
+      <!-- ── 심볼 관리 ── -->
+      <div class="settings-row">
+        <div class="settings-label">트래킹 심볼</div>
+        <div class="settings-controls" style="flex-direction:column;align-items:flex-start;gap:8px">
+          <div id="symbol-tags" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+          <div style="display:flex;gap:6px;align-items:center">
+            <input id="symbol-input" type="text" placeholder="XRPUSDT" maxlength="20"
+              style="background:var(--bg-input);border:1px solid var(--border);color:var(--text-primary);
+                     padding:4px 10px;border-radius:var(--radius-sm);font-family:var(--font-mono);
+                     font-size:13px;width:130px;outline:none"
+              onkeydown="if(event.key==='Enter')addSymbol()"
+            />
+            <button class="mode-btn" onclick="addSymbol()">+ 추가</button>
+            <button class="mode-btn" onclick="saveSymbols()">저장</button>
+          </div>
+        </div>
+        <div class="settings-desc">심볼 클릭 시 제거 / 추가 후 저장 버튼을 누르세요</div>
+      </div>
+
+    </div>
+  </div>
+
 </main>
 
 <!-- ============================================================
