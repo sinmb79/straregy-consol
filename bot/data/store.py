@@ -980,6 +980,31 @@ class DataStore:
         except Exception as exc:
             logger.error("SQLite operator_action insert error: %s", exc)
 
+    def is_duplicate_action(
+        self,
+        action_type: str,
+        target_id: str,
+        window_ms: int = 5 * 60 * 1000,   # 5분
+    ) -> bool:
+        """
+        동일 (action_type, target_id) 쌍이 window_ms 내에 이미 실행됐으면 True.
+        idempotent 운영 액션 보장용.
+        """
+        try:
+            since = int(time.time() * 1000) - window_ms
+            row = self._conn.execute(
+                """
+                SELECT id FROM operator_actions
+                WHERE action_type = ? AND target_id = ? AND ts >= ?
+                LIMIT 1
+                """,
+                (action_type, target_id, since),
+            ).fetchone()
+            return row is not None
+        except Exception as exc:
+            logger.error("SQLite is_duplicate_action error: %s", exc)
+            return False
+
     def get_recent_opportunities(self, limit: int = 10, status: str = "") -> list:
         """최근 Opportunity 조회."""
         try:

@@ -132,6 +132,12 @@ class ScoringEngine:
             total += self.PENALTY_EVENT_RISK
             breakdown["event_risk"] = self.PENALTY_EVENT_RISK
 
+        # ── -2  Fast Layer CAUTION (단기 구조 이상) ───────────────────────── #
+        fast = regime.get("fast_layer", {})
+        if fast.get("alert_level") == "CAUTION":
+            total += self.PENALTY_OVERSATURATED  # -2 (재사용)
+            breakdown["fast_layer_caution"] = self.PENALTY_OVERSATURATED
+
         # ── -3  불완전 데이터 ─────────────────────────────────────────────── #
         if self._is_incomplete_data(opp, regime):
             total += self.PENALTY_UNKNOWN_DATA

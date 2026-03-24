@@ -46,6 +46,7 @@ from bot.data.validation_replay import ValidationReplaySession
 from bot.data.replay_account import ReplayAccount
 from bot.notifications.telegram import TelegramNotifier
 from bot.regime.detector import RegimeDetector
+from bot.regime.fast_layer import FastLayer
 from bot.strategies.manager import StrategyManager
 from bot.execution.kill_switch import KillSwitch
 from bot.execution.state_machine import OrderStateMachine
@@ -98,6 +99,7 @@ class Engine:
         self._store: Optional[DataStore] = None
         self._collector: Optional[BinanceCollector] = None
         self._detector: Optional[RegimeDetector] = None
+        self._fast_layer: Optional[FastLayer] = None
         self._telegram: Optional[TelegramNotifier] = None
         self._strategy_manager: Optional[StrategyManager] = None
 
@@ -200,8 +202,9 @@ class Engine:
         else:
             logger.info("Offline validation dataset mode enabled — skipping live Binance collector startup.")
 
-        # 5. Regime Detector
+        # 5. Regime Detector + Fast Layer
         self._detector = RegimeDetector(self._store)
+        self._fast_layer = FastLayer(self._store)
 
         # 6. Strategy Manager (Phase 2)
         self._strategy_manager = StrategyManager(self._store)
@@ -408,6 +411,16 @@ class Engine:
     async def _run_engine_cycle(self, last_regime: str) -> str:
         result = self._detector.detect()
         new_regime = result["regime"]
+
+        # Fast Layer 병합 (단기 보조 신호)
+        if self._fast_layer is not None:
+            fast = self._fast_layer.compute("BTCUSDT")
+            result["fast_layer"] = fast
+            # CAUTION 이상이면 로그 경고
+            if fast.get("alert_level") == "CAUTION":
+                logger.warning(
+                    "[FastLayer] CAUTION: %s", fast.get("signals", [])
+                )
 
         if new_regime != last_regime:
             logger.info("Regime change: %s → %s", last_regime, new_regime)
@@ -646,12 +659,21 @@ class Engine:
 
                             if cq_data.startswith("mode:"):
                                 new_mode = cq_data.split(":", 1)[1]
-                                self._config.system_mode = new_mode
-                                self._store.set_system_mode(new_mode)
-                                logger.warning("[Telegram] Mode changed to %s via inline button", new_mode)
-                                await answer_callback(cq_id, f"모드 변경: {new_mode}")
-                                await self._telegram.send_message(f"✅ 운영 모드 변경: `{new_mode}`")
-                                await send_control_menu(cq_chat)
+                                # 중복 액션 방지: 5분 내 동일 모드 전환 무시
+                                if self._store.is_duplicate_action("mode_change", new_mode, 5 * 60 * 1000):
+                                    await answer_callback(cq_id, "이미 실행된 액션입니다")
+                                else:
+                                    self._config.system_mode = new_mode
+                                    self._store.set_system_mode(new_mode)
+                                    self._store.save_operator_action({
+                                        "source": "telegram", "operator": str(cq_chat),
+                                        "action_type": "mode_change", "target_id": new_mode,
+                                        "result": "ok",
+                                    })
+                                    logger.warning("[Telegram] Mode changed to %s via inline button", new_mode)
+                                    await answer_callback(cq_id, f"모드 변경: {new_mode}")
+                                    await self._telegram.send_message(f"✅ 운영 모드 변경: `{new_mode}`")
+                                    await send_control_menu(cq_chat)
 
                             elif cq_data == "cmd:status":
                                 await answer_callback(cq_id)
@@ -733,26 +755,42 @@ class Engine:
                                 )
 
                             elif cq_data == "cmd:kill":
-                                await answer_callback(cq_id, "Soft Kill 활성화")
-                                await self._kill_switch.trigger_soft(
-                                    reason="Inline button /kill (SOFT) via Telegram",
-                                    triggered_by=f"telegram:{cq_chat}",
-                                )
-                                await self._telegram.send_message(
-                                    "⛔ *Soft Kill 활성화*\n신규 진입 차단. 기존 포지션 SL/TP 유지.\n해제: ✅ Kill Reset 버튼"
-                                )
-                                await send_control_menu(cq_chat)
+                                if self._store.is_duplicate_action("kill_soft", "system", 60 * 1000):
+                                    await answer_callback(cq_id, "이미 처리 중입니다")
+                                else:
+                                    await answer_callback(cq_id, "Soft Kill 활성화")
+                                    self._store.save_operator_action({
+                                        "source": "telegram", "operator": str(cq_chat),
+                                        "action_type": "kill_soft", "target_id": "system",
+                                        "result": "triggered",
+                                    })
+                                    await self._kill_switch.trigger_soft(
+                                        reason="Inline button /kill (SOFT) via Telegram",
+                                        triggered_by=f"telegram:{cq_chat}",
+                                    )
+                                    await self._telegram.send_message(
+                                        "⛔ *Soft Kill 활성화*\n신규 진입 차단. 기존 포지션 SL/TP 유지.\n해제: ✅ Kill Reset 버튼"
+                                    )
+                                    await send_control_menu(cq_chat)
 
                             elif cq_data == "cmd:kill_hard":
-                                await answer_callback(cq_id, "Hard Kill 활성화")
-                                await self._kill_switch.trigger_hard(
-                                    reason="Inline button /killhard via Telegram",
-                                    triggered_by=f"telegram:{cq_chat}",
-                                )
-                                await self._telegram.send_message(
-                                    "🚨 *Hard Kill 활성화*\n신규 진입 차단 + 미체결 주문 전체 취소.\n해제: ✅ Kill Reset 버튼"
-                                )
-                                await send_control_menu(cq_chat)
+                                if self._store.is_duplicate_action("kill_hard", "system", 60 * 1000):
+                                    await answer_callback(cq_id, "이미 처리 중입니다")
+                                else:
+                                    await answer_callback(cq_id, "Hard Kill 활성화")
+                                    self._store.save_operator_action({
+                                        "source": "telegram", "operator": str(cq_chat),
+                                        "action_type": "kill_hard", "target_id": "system",
+                                        "result": "triggered",
+                                    })
+                                    await self._kill_switch.trigger_hard(
+                                        reason="Inline button /killhard via Telegram",
+                                        triggered_by=f"telegram:{cq_chat}",
+                                    )
+                                    await self._telegram.send_message(
+                                        "🚨 *Hard Kill 활성화*\n신규 진입 차단 + 미체결 주문 전체 취소.\n해제: ✅ Kill Reset 버튼"
+                                    )
+                                    await send_control_menu(cq_chat)
 
                             elif cq_data == "cmd:reset":
                                 if self._kill_switch and self._kill_switch.is_active:

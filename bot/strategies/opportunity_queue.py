@@ -22,8 +22,11 @@ from bot.strategies.opportunity import Opportunity
 
 logger = logging.getLogger(__name__)
 
-# 기회 유효 시간 (ms) — 이 시간 지나면 EXPIRED
+# 기회 유효 시간 (ms) — PENDING이 이 시간 지나면 EXPIRED
 OPPORTUNITY_TTL_MS = 60 * 60 * 1000   # 1시간
+
+# 승인 후 미실행 만료 시간 (ms) — APPROVED 상태가 이 시간 지나면 STALE_APPROVAL
+APPROVAL_TTL_MS = 15 * 60 * 1000      # 15분
 
 # 큐 최대 크기
 MAX_QUEUE_SIZE = 200
@@ -130,10 +133,35 @@ class OpportunityQueue:
     # ---------------------------------------------------------------------- #
 
     def _expire_old(self) -> None:
+        """
+        두 가지 만료 처리:
+          1. PENDING: ts 기준 1시간 초과 → EXPIRED
+          2. APPROVED: approved_at 기준 15분 초과 미실행 → STALE_APPROVAL
+        """
         now = int(time.time() * 1000)
         for o in self._queue:
             if o.execution_status == "PENDING" and (now - o.ts) > OPPORTUNITY_TTL_MS:
                 o.execution_status = "EXPIRED"
+                logger.info(
+                    "[OppQueue] Expired (TTL): %s %s  score=%d",
+                    o.symbol, o.side, o.score_total,
+                )
+            elif (
+                o.execution_status == "APPROVED"
+                and o.approved_at is not None
+                and (now - o.approved_at) > APPROVAL_TTL_MS
+            ):
+                o.execution_status = "STALE_APPROVAL"
+                logger.warning(
+                    "[OppQueue] Stale approval: %s %s  approved_at=%d  age=%.0fmin",
+                    o.symbol, o.side, o.approved_at,
+                    (now - o.approved_at) / 60000,
+                )
+
+    def expire_stale_approvals(self) -> List[Opportunity]:
+        """만료된 APPROVED 기회 목록 반환 (외부 알림용)."""
+        self._expire_old()
+        return [o for o in self._queue if o.execution_status == "STALE_APPROVAL"]
 
     def _rank_all(self) -> None:
         """전체 PENDING 기회를 순위 재산정."""

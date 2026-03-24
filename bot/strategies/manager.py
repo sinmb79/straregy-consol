@@ -203,6 +203,14 @@ class StrategyManager:
         if self._health_engine is not None:
             self._health_engine.run_health_check()
 
+        # Stale approval 만료 처리 및 DB 동기화
+        stale = self._opp_queue.expire_stale_approvals()
+        for opp in stale:
+            try:
+                self._store.save_opportunity(opp.to_dict())
+            except Exception as exc:
+                logger.error("[StrategyManager] Stale approval DB sync error: %s", exc)
+
         return all_signals
 
     # ---------------------------------------------------------------------- #
