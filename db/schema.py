@@ -297,6 +297,35 @@ CREATE TABLE IF NOT EXISTS telegram_events (
 );
 """
 
+DDL_IMAGE_PATTERNS = """
+CREATE TABLE IF NOT EXISTS image_patterns (
+    id                TEXT    PRIMARY KEY,          -- UUID4
+    created_at        INTEGER NOT NULL,
+    pattern_name      TEXT    NOT NULL,
+    description       TEXT,
+    symbol            TEXT    NOT NULL DEFAULT 'ALL',
+    interval          TEXT    NOT NULL DEFAULT '1h',
+    direction         TEXT    NOT NULL DEFAULT 'LONG',  -- LONG | SHORT
+    conditions_json   TEXT    NOT NULL DEFAULT '[]',    -- JSON list of condition dicts
+    conditions_logic  TEXT    NOT NULL DEFAULT 'AND',   -- AND | OR
+    tp_pct            REAL    NOT NULL DEFAULT 3.0,
+    sl_pct            REAL    NOT NULL DEFAULT 1.5,
+    regime_filter_json TEXT,                            -- JSON list of regime strings (NULL = all)
+    min_confidence    REAL    NOT NULL DEFAULT 0.65,
+    cooldown_hours    REAL    NOT NULL DEFAULT 4.0,
+    enabled           INTEGER NOT NULL DEFAULT 1,
+    last_signal_ts    INTEGER,                          -- last time a signal was fired
+    image_b64         TEXT,                             -- base64 thumbnail (optional)
+    ai_warnings_json  TEXT,                             -- JSON list of AI warnings
+    confidence_note   TEXT                              -- AI confidence explanation
+);
+"""
+
+DDL_IMAGE_PATTERNS_IDX = """
+CREATE INDEX IF NOT EXISTS idx_image_patterns_enabled
+    ON image_patterns (enabled, created_at DESC);
+"""
+
 ALL_DDL = [
     DDL_CANDLES, DDL_CANDLES_IDX,
     DDL_TICKERS, DDL_TICKERS_IDX,
@@ -312,6 +341,7 @@ ALL_DDL = [
     DDL_OPPORTUNITIES, DDL_OPPORTUNITIES_IDX,
     DDL_OPERATOR_ACTIONS, DDL_OPERATOR_ACTIONS_IDX,
     DDL_TELEGRAM_EVENTS,
+    DDL_IMAGE_PATTERNS, DDL_IMAGE_PATTERNS_IDX,
 ]
 
 # Phase 3 migration: add new columns to existing tables
@@ -367,6 +397,14 @@ def init_db(db_path: str) -> sqlite3.Connection:
     for ddl in ALL_DDL:
         cursor.executescript(ddl)
     conn.commit()
+
+    # image_patterns table (may not exist on older DBs — safe to run DDL again)
+    try:
+        cursor.executescript(DDL_IMAGE_PATTERNS)
+        cursor.executescript(DDL_IMAGE_PATTERNS_IDX)
+        conn.commit()
+    except Exception:
+        pass
 
     # Phase 3 + v1.3 migrations (safe — ignore errors for columns that already exist)
     for migration in PHASE3_MIGRATIONS + V13_MIGRATIONS:

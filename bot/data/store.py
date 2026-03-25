@@ -700,6 +700,136 @@ class DataStore:
             logger.error("SQLite get_trade_log error: %s", exc)
             return []
 
+    def get_paper_performance_data(self) -> List[dict]:
+        """
+        Return all closed paper positions ordered by close time (ASC) for
+        equity-curve computation.  Only rows with a valid pnl_pct are included.
+        """
+        try:
+            rows = self._conn.execute(
+                """
+                SELECT strategy, symbol, side, entry_price, exit_price,
+                       pnl_pct, opened_at, closed_at, close_reason
+                FROM paper_positions
+                WHERE status = 'CLOSED' AND pnl_pct IS NOT NULL
+                ORDER BY closed_at ASC
+                """,
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception as exc:
+            logger.error("SQLite get_paper_performance_data error: %s", exc)
+            return []
+
+    # ---------------------------------------------------------------------- #
+    # Image Pattern Strategy — CRUD
+    # ---------------------------------------------------------------------- #
+
+    def save_image_pattern(self, pattern: dict) -> None:
+        """Insert a new image pattern record."""
+        try:
+            self._conn.execute(
+                """
+                INSERT OR REPLACE INTO image_patterns
+                    (id, created_at, pattern_name, description, symbol, interval,
+                     direction, conditions_json, conditions_logic,
+                     tp_pct, sl_pct, regime_filter_json, min_confidence,
+                     cooldown_hours, enabled, last_signal_ts,
+                     image_b64, ai_warnings_json, confidence_note)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    pattern.get("id"),
+                    pattern.get("created_at"),
+                    pattern.get("pattern_name", "Custom Pattern"),
+                    pattern.get("description", ""),
+                    pattern.get("symbol", "ALL"),
+                    pattern.get("interval", "1h"),
+                    pattern.get("direction", "LONG"),
+                    pattern.get("conditions_json", "[]"),
+                    pattern.get("conditions_logic", "AND"),
+                    pattern.get("tp_pct", 3.0),
+                    pattern.get("sl_pct", 1.5),
+                    pattern.get("regime_filter_json"),
+                    pattern.get("min_confidence", 0.65),
+                    pattern.get("cooldown_hours", 4.0),
+                    int(pattern.get("enabled", 1)),
+                    pattern.get("last_signal_ts"),
+                    pattern.get("image_b64"),
+                    pattern.get("ai_warnings_json"),
+                    pattern.get("confidence_note"),
+                ),
+            )
+            self._conn.commit()
+        except Exception as exc:
+            logger.error("SQLite save_image_pattern error: %s", exc)
+
+    def get_active_image_patterns(self) -> List[dict]:
+        """Return all enabled image patterns."""
+        try:
+            rows = self._conn.execute(
+                "SELECT * FROM image_patterns WHERE enabled = 1 ORDER BY created_at DESC"
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception as exc:
+            logger.error("SQLite get_active_image_patterns error: %s", exc)
+            return []
+
+    def get_all_image_patterns(self) -> List[dict]:
+        """Return all image patterns (enabled + disabled)."""
+        try:
+            rows = self._conn.execute(
+                "SELECT * FROM image_patterns ORDER BY created_at DESC"
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception as exc:
+            logger.error("SQLite get_all_image_patterns error: %s", exc)
+            return []
+
+    def update_image_pattern(self, pattern_id: str, updates: dict) -> bool:
+        """Update specific fields on an image pattern."""
+        allowed = {
+            "pattern_name", "description", "symbol", "interval", "direction",
+            "conditions_json", "conditions_logic", "tp_pct", "sl_pct",
+            "regime_filter_json", "min_confidence", "cooldown_hours", "enabled",
+        }
+        fields = {k: v for k, v in updates.items() if k in allowed}
+        if not fields:
+            return False
+        set_clause = ", ".join(f"{k} = ?" for k in fields)
+        try:
+            self._conn.execute(
+                f"UPDATE image_patterns SET {set_clause} WHERE id = ?",
+                list(fields.values()) + [pattern_id],
+            )
+            self._conn.commit()
+            return True
+        except Exception as exc:
+            logger.error("SQLite update_image_pattern error: %s", exc)
+            return False
+
+    def delete_image_pattern(self, pattern_id: str) -> bool:
+        """Delete an image pattern by id."""
+        try:
+            self._conn.execute(
+                "DELETE FROM image_patterns WHERE id = ?", (pattern_id,)
+            )
+            self._conn.commit()
+            return True
+        except Exception as exc:
+            logger.error("SQLite delete_image_pattern error: %s", exc)
+            return False
+
+    def update_image_pattern_last_signal(self, pattern_id: str, ts_ms: int) -> None:
+        """Update the last_signal_ts for cooldown tracking."""
+        try:
+            self._conn.execute(
+                "UPDATE image_patterns SET last_signal_ts = ? WHERE id = ?",
+                (ts_ms, pattern_id),
+            )
+            self._conn.commit()
+        except Exception as exc:
+            logger.error("SQLite update_image_pattern_last_signal error: %s", exc)
+
     # ---------------------------------------------------------------------- #
     # Phase 3 — Account balance
     # ---------------------------------------------------------------------- #

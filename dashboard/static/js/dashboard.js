@@ -2055,3 +2055,407 @@ async function confirmRestart() {
   showToast('success', 'Dashboard Reloading', 'Reconnecting in 6 seconds…', 6000);
   setTimeout(() => location.reload(), 6000);
 }
+
+// ============================================================
+// Image Pattern Strategy Panel
+// ============================================================
+const _ipt = {
+  file:     null,
+  analysis: null,
+  imgB64:   null,
+  contentType: null,
+};
+
+function iptDragOver(e) {
+  e.preventDefault();
+  $('ipt-dropzone').classList.add('drag-over');
+}
+function iptDragLeave(e) {
+  $('ipt-dropzone').classList.remove('drag-over');
+}
+function iptDrop(e) {
+  e.preventDefault();
+  $('ipt-dropzone').classList.remove('drag-over');
+  const file = e.dataTransfer.files[0];
+  if (file) iptSetFile(file);
+}
+function iptFileSelected(e) {
+  const file = e.target.files[0];
+  if (file) iptSetFile(file);
+}
+
+function iptSetFile(file) {
+  if (!file.type.startsWith('image/')) {
+    showToast('error', '오류', '이미지 파일만 업로드 가능합니다', 3000);
+    return;
+  }
+  _ipt.file = file;
+  _ipt.contentType = file.type;
+
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    const img = $('ipt-preview-img');
+    img.src = e.target.result;
+    $('ipt-preview-wrap').style.display = 'block';
+    $('ipt-dropzone-hint').style.display = 'none';
+    $('ipt-analyze-btn').disabled = false;
+  };
+  reader.readAsDataURL(file);
+}
+
+async function iptAnalyze() {
+  if (!_ipt.file) return;
+  const btn = $('ipt-analyze-btn');
+  btn.disabled = true;
+  btn.textContent = '⏳ AI 분석 중…';
+
+  const formData = new FormData();
+  formData.append('file',        _ipt.file);
+  formData.append('symbol',      $('ipt-symbol').value);
+  formData.append('timeframe',   $('ipt-timeframe').value);
+  formData.append('description', $('ipt-description').value);
+
+  try {
+    const resp = await fetch('/api/image-pattern/analyze', {
+      method: 'POST',
+      body:   formData,
+    });
+    const data = await resp.json();
+
+    if (!resp.ok || !data.ok) {
+      showToast('error', 'AI 분석 실패', data.detail || data.error || '오류 발생', 5000);
+      return;
+    }
+    _ipt.analysis    = data.analysis;
+    _ipt.imgB64      = data.image_b64;
+    _ipt.contentType = data.content_type;
+    iptRenderResult(data.analysis);
+    showToast('success', 'AI 분석 완료', data.analysis.pattern_name, 3000);
+  } catch (e) {
+    showToast('error', '네트워크 오류', e.message, 4000);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🤖 AI 분석 시작';
+  }
+}
+
+function iptRenderResult(a) {
+  const sec = $('ipt-result-section');
+  if (!sec) return;
+  sec.style.display = 'block';
+
+  // 요약 카드
+  const dirColor = a.direction === 'LONG' ? 'var(--green)' : 'var(--red)';
+  $('ipt-result-grid').innerHTML = `
+    <div class="ipt-result-card">
+      <span class="ipt-label">패턴명</span>
+      <div class="ipt-val" style="font-size:13px">${escapeHtml(a.pattern_name || '—')}</div>
+    </div>
+    <div class="ipt-result-card">
+      <span class="ipt-label">방향</span>
+      <div class="ipt-val" style="color:${dirColor}">${a.direction || '—'}</div>
+    </div>
+    <div class="ipt-result-card">
+      <span class="ipt-label">TP %</span>
+      <div class="ipt-val highlight-green">+${(a.tp_pct || 3).toFixed(1)}%</div>
+    </div>
+    <div class="ipt-result-card">
+      <span class="ipt-label">SL %</span>
+      <div class="ipt-val highlight-red">-${(a.sl_pct || 1.5).toFixed(1)}%</div>
+    </div>
+    <div class="ipt-result-card">
+      <span class="ipt-label">쿨다운</span>
+      <div class="ipt-val">${(a.cooldown_hours || 4)}h</div>
+    </div>
+    <div class="ipt-result-card">
+      <span class="ipt-label">신뢰도</span>
+      <div class="ipt-val">${((a.min_confidence || 0.65) * 100).toFixed(0)}%</div>
+    </div>`;
+
+  // 로직 배지
+  const logicBadge = $('ipt-logic-badge');
+  if (logicBadge) logicBadge.textContent = a.conditions_logic || 'AND';
+
+  // 조건 목록
+  const condList = $('ipt-conditions-list');
+  if (condList) {
+    const conds = a.conditions || [];
+    if (conds.length === 0) {
+      condList.innerHTML = '<div class="text-muted" style="font-size:12px">조건 없음</div>';
+    } else {
+      condList.innerHTML = conds.map(c => {
+        const params = Object.entries(c)
+          .filter(([k]) => k !== 'type')
+          .map(([k, v]) => `${k}=${v}`)
+          .join(', ');
+        return `<div class="ipt-condition-item">
+          <span class="ipt-condition-type">${escapeHtml(c.type)}</span>
+          <span class="ipt-condition-params">${escapeHtml(params)}</span>
+        </div>`;
+      }).join('');
+    }
+  }
+
+  // 경고
+  const warns = a.warnings || [];
+  const warnSec = $('ipt-warnings-section');
+  if (warnSec) {
+    warnSec.style.display = warns.length > 0 ? 'block' : 'none';
+    $('ipt-warnings-list').innerHTML = warns.map(w => `<li>${escapeHtml(w)}</li>`).join('');
+  }
+}
+
+async function iptSave() {
+  if (!_ipt.analysis) return;
+  const btn = $('ipt-save-btn');
+  btn.disabled = true;
+  btn.textContent = '저장 중…';
+
+  try {
+    const resp = await fetch('/api/image-pattern/save', {
+      method:  'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        analysis:     _ipt.analysis,
+        symbol:       $('ipt-symbol').value,
+        interval:     $('ipt-timeframe').value,
+        image_b64:    _ipt.imgB64,
+        content_type: _ipt.contentType,
+      }),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      showToast('success', '저장 완료', `전략 ID: ${data.id.slice(0,8)}…`, 3000);
+      iptReset();
+      iptLoadPatterns();
+    } else {
+      showToast('error', '저장 실패', data.detail || '오류', 3000);
+    }
+  } catch (e) {
+    showToast('error', '네트워크 오류', e.message, 3000);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '✅ 전략으로 저장';
+  }
+}
+
+function iptReset() {
+  _ipt.file = null; _ipt.analysis = null; _ipt.imgB64 = null;
+  $('ipt-preview-wrap').style.display  = 'none';
+  $('ipt-dropzone-hint').style.display = 'block';
+  $('ipt-result-section').style.display = 'none';
+  $('ipt-analyze-btn').disabled = true;
+  $('ipt-file-input').value = '';
+  $('ipt-description').value = '';
+}
+
+async function iptLoadPatterns() {
+  try {
+    const resp = await fetch('/api/image-patterns');
+    if (!resp.ok) return;
+    const patterns = await resp.json();
+    iptRenderPatterns(patterns);
+  } catch (e) {
+    console.debug('iptLoadPatterns error:', e);
+  }
+}
+
+function iptRenderPatterns(patterns) {
+  const container = $('ipt-patterns-list');
+  if (!container) return;
+  if (!patterns || patterns.length === 0) {
+    container.innerHTML = '<div class="text-muted" style="font-size:12px;padding:16px;text-align:center">저장된 패턴이 없습니다</div>';
+    return;
+  }
+  container.innerHTML = patterns.map(p => {
+    const enabled   = p.enabled === 1 || p.enabled === true;
+    const dirColor  = p.direction === 'LONG' ? 'var(--green)' : 'var(--red)';
+    const rfJson    = p.regime_filter_json;
+    let rfText = '전체 레짐';
+    if (rfJson) { try { const rf = JSON.parse(rfJson); rfText = rf.join(', ') || '전체'; } catch(e){} }
+    const conds = (() => { try { return JSON.parse(p.conditions_json || '[]'); } catch(e){ return []; } })();
+    const ts    = p.created_at ? new Date(p.created_at).toLocaleDateString('ko-KR') : '—';
+    return `
+      <div class="ipt-pattern-card${enabled ? '' : ' disabled'}">
+        <div class="ipt-pattern-info">
+          <div class="ipt-pattern-name">${escapeHtml(p.pattern_name)}</div>
+          <div class="ipt-pattern-desc">${escapeHtml(p.description || '—')}</div>
+          <div class="ipt-pattern-meta">
+            <span style="color:${dirColor}">${p.direction}</span>
+            <span>TP +${(p.tp_pct||3).toFixed(1)}%</span>
+            <span>SL -${(p.sl_pct||1.5).toFixed(1)}%</span>
+            <span>${p.symbol} · ${p.interval}</span>
+            <span>${conds.length}개 조건</span>
+            <span>${rfText}</span>
+            <span>생성: ${ts}</span>
+          </div>
+        </div>
+        <div class="ipt-pattern-actions">
+          <button class="btn-sm ${enabled ? 'btn-danger' : ''}"
+            onclick="iptToggle('${escapeHtml(p.id)}')"
+            title="${enabled ? '비활성화' : '활성화'}">
+            ${enabled ? '⏸ 끄기' : '▶ 켜기'}
+          </button>
+          <button class="btn-sm"
+            onclick="iptDelete('${escapeHtml(p.id)}', '${escapeHtml(p.pattern_name)}')">
+            🗑 삭제
+          </button>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+async function iptToggle(id) {
+  try {
+    const resp = await fetch(`/api/image-pattern/${id}/toggle`, { method: 'PATCH' });
+    const data = await resp.json();
+    showToast('success', data.enabled ? '활성화' : '비활성화', '패턴 전략 상태 변경', 2000);
+    iptLoadPatterns();
+  } catch (e) {
+    showToast('error', '오류', e.message, 3000);
+  }
+}
+
+async function iptDelete(id, name) {
+  if (!confirm(`'${name}' 패턴을 삭제하시겠습니까?`)) return;
+  try {
+    const resp = await fetch(`/api/image-pattern/${id}`, { method: 'DELETE' });
+    const data = await resp.json();
+    if (data.ok) {
+      showToast('success', '삭제됨', name, 2000);
+      iptLoadPatterns();
+    }
+  } catch (e) {
+    showToast('error', '오류', e.message, 3000);
+  }
+}
+
+// 초기 로드
+iptLoadPatterns();
+
+// ============================================================
+// Paper Performance Panel
+// ============================================================
+async function refreshPerformance() {
+  const inp = $('perf-capital-input');
+  const capital = inp ? (parseFloat(inp.value) || 1000) : 1000;
+  try {
+    const resp = await fetch(`/api/paper-performance?capital=${capital}`);
+    if (!resp.ok) return;
+    const d = await resp.json();
+    renderPerformance(d);
+  } catch (e) {
+    // silently ignore — panel shows dashes on error
+  }
+}
+
+function renderPerformance(d) {
+  const capital = d.capital ?? 1000;
+  const total   = d.total_trades ?? 0;
+
+  // Win Rate
+  const wrEl = $('perf-win-rate');
+  if (wrEl) {
+    if (total === 0) {
+      wrEl.textContent = '—';
+      wrEl.className = 'perf-value';
+    } else {
+      wrEl.textContent = (d.win_rate * 100).toFixed(1) + '%';
+      wrEl.className   = 'perf-value ' + (d.win_rate >= 0.5 ? 'highlight-green' : 'highlight-red');
+    }
+  }
+  setText('perf-win-loss', total === 0 ? '— 승 / — 패' : `${d.wins} 승 / ${d.losses} 패`);
+
+  // Total trades
+  setText('perf-total-trades', total === 0 ? '—' : total);
+  setText('perf-trade-sub', total === 0 ? 'paper trades' : `거래당 $${(d.per_trade_alloc ?? 0).toFixed(0)} 배분`);
+
+  // Net P&L USD
+  const pnlEl = $('perf-net-pnl-usd');
+  if (pnlEl) {
+    if (total === 0) {
+      pnlEl.textContent = '—';
+      pnlEl.className = 'perf-value';
+    } else {
+      const pnl = d.net_pnl_usd ?? 0;
+      pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + Math.abs(pnl).toFixed(2);
+      pnlEl.className   = 'perf-value ' + (pnl >= 0 ? 'highlight-green' : 'highlight-red');
+    }
+  }
+  const pnlPct = d.net_pnl_pct ?? 0;
+  setText('perf-net-pnl-pct', total === 0 ? '—' : `${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%`);
+
+  // Final balance
+  const fbEl = $('perf-final-balance');
+  if (fbEl) {
+    if (total === 0) {
+      fbEl.textContent = '$' + capital.toFixed(2);
+      fbEl.className = 'perf-value';
+    } else {
+      const fb = d.final_balance ?? capital;
+      fbEl.textContent = '$' + fb.toFixed(2);
+      fbEl.className   = 'perf-value ' + (fb >= capital ? 'highlight-green' : 'highlight-red');
+    }
+  }
+  setText('perf-capital-sub', `$${capital.toLocaleString(undefined, {maximumFractionDigits:0})} 기준`);
+
+  // Profit Factor
+  const pfEl = $('perf-profit-factor');
+  if (pfEl) {
+    if (d.profit_factor == null) {
+      pfEl.textContent = '—';
+      pfEl.className = 'perf-value';
+    } else {
+      pfEl.textContent = d.profit_factor.toFixed(2);
+      pfEl.className   = 'perf-value ' + (d.profit_factor >= 1.5 ? 'highlight-green' : d.profit_factor >= 1 ? 'highlight-yellow' : 'highlight-red');
+    }
+  }
+
+  // Max Drawdown
+  const ddEl = $('perf-max-dd');
+  if (ddEl) {
+    const dd = d.max_drawdown_usd ?? 0;
+    ddEl.textContent = total === 0 ? '—' : '$' + dd.toFixed(2);
+    ddEl.className   = total === 0 ? 'perf-value' : 'perf-value ' + (dd < 0 ? 'highlight-red' : '');
+  }
+  const expVal = (d.expectancy_usd == null || total === 0)
+    ? '기대값: —'
+    : `기대값: ${d.expectancy_usd >= 0 ? '+' : ''}$${d.expectancy_usd.toFixed(2)} / 거래`;
+  setText('perf-expectancy', expVal);
+
+  // Per-strategy table
+  const tbody = $('perf-strategy-tbody');
+  if (!tbody) return;
+  const strategies = d.per_strategy ?? {};
+  const names = Object.keys(strategies);
+
+  if (names.length === 0) {
+    tbody.innerHTML = '<tr class="signals-empty-row"><td colspan="7">거래 기록 없음 — 전략이 포지션을 닫으면 표시됩니다</td></tr>';
+    return;
+  }
+
+  names.sort((a, b) => (strategies[b].net_pnl_usd ?? 0) - (strategies[a].net_pnl_usd ?? 0));
+
+  tbody.innerHTML = names.map(name => {
+    const s = strategies[name];
+    const wr = (s.win_rate * 100).toFixed(1) + '%';
+    const wrCls = s.win_rate >= 0.5 ? 'highlight-green' : 'highlight-red';
+    const pnlCls = s.net_pnl_usd >= 0 ? 'highlight-green' : 'highlight-red';
+    const pnlSign = s.net_pnl_usd >= 0 ? '+' : '';
+    const label = name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    return `
+      <tr>
+        <td><span class="text-mono" style="font-size:11px">${label}</span></td>
+        <td style="text-align:center">${s.trades}</td>
+        <td style="text-align:center">${s.wins}W / ${s.losses}L</td>
+        <td style="text-align:center"><span class="${wrCls}">${wr}</span></td>
+        <td style="text-align:right"><span class="highlight-green">+${s.avg_win_pct.toFixed(2)}%</span></td>
+        <td style="text-align:right"><span class="highlight-red">${s.avg_loss_pct.toFixed(2)}%</span></td>
+        <td style="text-align:right"><span class="${pnlCls}">${pnlSign}$${Math.abs(s.net_pnl_usd).toFixed(2)}</span></td>
+      </tr>`;
+  }).join('');
+}
+
+// 초기 로드 및 60초마다 갱신
+refreshPerformance();
+setInterval(refreshPerformance, 60000);

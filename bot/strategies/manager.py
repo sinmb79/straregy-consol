@@ -33,6 +33,8 @@ from bot.market.symbol_universe import SymbolUniverse
 from bot.strategies.overreaction_reversal import OverreactionReversalStrategy
 from bot.strategies.volatility_expansion_breakout import VolatilityExpansionBreakoutStrategy
 from bot.strategies.early_trend_capture import EarlyTrendCaptureStrategy
+# 이미지 패턴 전략 (사용자 정의)
+from bot.strategies.image_pattern_strategy import ImagePatternStrategy
 
 if TYPE_CHECKING:
     from bot.data.store import DataStore
@@ -67,11 +69,13 @@ class StrategyManager:
         self._scorer      = ScoringEngine()
         self._opp_queue   = OpportunityQueue(top_n_live=2)
 
-        # v1.3 전략 3개 (우선순위 순)
+        # v1.3 전략 3개 + 이미지 패턴 전략 (우선순위 순)
+        self._image_pattern_strategy = ImagePatternStrategy()
         self._strategies: List[StrategyBase] = [
             OverreactionReversalStrategy(),
             VolatilityExpansionBreakoutStrategy(),
             EarlyTrendCaptureStrategy(),
+            self._image_pattern_strategy,
         ]
 
         self._state: Dict[str, dict] = {}

@@ -36,7 +36,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -826,6 +826,347 @@ def create_app(
             logger.warning("[Dashboard] Backtest report load error: %s", exc)
 
         return JSONResponse({"source": "none", "metrics": {}, "equity_curve": []})
+
+    @app.get("/api/paper-performance")
+    async def api_paper_performance(capital: float = 1000.0, max_positions: int = 2):
+        """
+        Paper trading performance simulation.
+        capital          — simulated starting balance (default $1000)
+        max_positions    — max concurrent positions (used for per-trade sizing)
+        """
+        from collections import defaultdict
+
+        trades = store.get_paper_performance_data()
+
+        per_trade_alloc = capital / max(max_positions, 1)
+
+        if not trades:
+            return JSONResponse({
+                "capital": capital,
+                "per_trade_alloc": per_trade_alloc,
+                "total_trades": 0,
+                "wins": 0,
+                "losses": 0,
+                "win_rate": 0.0,
+                "net_pnl_usd": 0.0,
+                "net_pnl_pct": 0.0,
+                "final_balance": capital,
+                "avg_win_pct": 0.0,
+                "avg_loss_pct": 0.0,
+                "profit_factor": None,
+                "max_drawdown_usd": 0.0,
+                "expectancy_usd": 0.0,
+                "per_strategy": {},
+                "equity_curve": [],
+            })
+
+        wins_list   = [t for t in trades if float(t["pnl_pct"]) > 0]
+        losses_list = [t for t in trades if float(t["pnl_pct"]) <= 0]
+        total = len(trades)
+
+        win_rate    = len(wins_list) / total
+        avg_win_pct = sum(float(t["pnl_pct"]) for t in wins_list) / len(wins_list) if wins_list else 0.0
+        avg_loss_pct = sum(float(t["pnl_pct"]) for t in losses_list) / len(losses_list) if losses_list else 0.0
+
+        gross_profit = sum(float(t["pnl_pct"]) for t in wins_list)
+        gross_loss   = abs(sum(float(t["pnl_pct"]) for t in losses_list))
+        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else None
+
+        # Equity curve — fixed per-trade allocation (non-compounding)
+        balance  = capital
+        peak     = capital
+        max_dd   = 0.0
+        equity_curve = []
+        for i, t in enumerate(trades):
+            pnl_usd = per_trade_alloc * float(t["pnl_pct"]) / 100
+            balance += pnl_usd
+            if balance > peak:
+                peak = balance
+            dd = balance - peak
+            if dd < max_dd:
+                max_dd = dd
+            equity_curve.append({
+                "i":        i + 1,
+                "strategy": t["strategy"],
+                "symbol":   t["symbol"],
+                "pnl_pct":  round(float(t["pnl_pct"]), 4),
+                "pnl_usd":  round(pnl_usd, 2),
+                "balance":  round(balance, 2),
+                "ts":       t["closed_at"],
+            })
+
+        net_pnl_usd = balance - capital
+        net_pnl_pct = net_pnl_usd / capital * 100
+
+        # Per-strategy breakdown
+        groups = defaultdict(list)
+        for t in trades:
+            groups[t["strategy"]].append(float(t["pnl_pct"]))
+
+        per_strategy_result = {}
+        for name, pnls in groups.items():
+            n   = len(pnls)
+            w   = [p for p in pnls if p > 0]
+            l   = [p for p in pnls if p <= 0]
+            wr  = len(w) / n if n > 0 else 0.0
+            net_usd = sum(per_trade_alloc * p / 100 for p in pnls)
+            per_strategy_result[name] = {
+                "trades":       n,
+                "wins":         len(w),
+                "losses":       len(l),
+                "win_rate":     round(wr, 4),
+                "net_pnl_usd":  round(net_usd, 2),
+                "avg_win_pct":  round(sum(w) / len(w), 2) if w else 0.0,
+                "avg_loss_pct": round(sum(l) / len(l), 2) if l else 0.0,
+            }
+
+        avg_win_usd  = avg_win_pct / 100 * per_trade_alloc
+        avg_loss_usd = abs(avg_loss_pct) / 100 * per_trade_alloc
+        expectancy_usd = (win_rate * avg_win_usd) - ((1 - win_rate) * avg_loss_usd)
+
+        return JSONResponse({
+            "capital":          capital,
+            "per_trade_alloc":  round(per_trade_alloc, 2),
+            "total_trades":     total,
+            "wins":             len(wins_list),
+            "losses":           len(losses_list),
+            "win_rate":         round(win_rate, 4),
+            "net_pnl_usd":      round(net_pnl_usd, 2),
+            "net_pnl_pct":      round(net_pnl_pct, 2),
+            "final_balance":    round(balance, 2),
+            "avg_win_pct":      round(avg_win_pct, 2),
+            "avg_loss_pct":     round(avg_loss_pct, 2),
+            "profit_factor":    round(profit_factor, 2) if profit_factor is not None else None,
+            "max_drawdown_usd": round(max_dd, 2),
+            "expectancy_usd":   round(expectancy_usd, 2),
+            "per_strategy":     per_strategy_result,
+            "equity_curve":     equity_curve,
+        })
+
+    # ------------------------------------------------------------------ #
+    # Image Pattern Strategy
+    # ------------------------------------------------------------------ #
+
+    # AI 분석 프롬프트 — OpenClaw에게 전달
+    _CHART_ANALYSIS_PROMPT = """당신은 암호화폐 트레이딩 차트 패턴 분석 전문가입니다.
+
+사용자가 차트 이미지에 직접 그린 표시(선, 화살표, 원, 텍스트 주석 등)를 분석하여
+매매 조건을 아래 JSON 형식으로 반환하세요.
+
+## 사용 가능한 조건 타입 (conditions 배열에서만 사용)
+- rsi_below: {"type":"rsi_below","value":30,"period":14}
+- rsi_above: {"type":"rsi_above","value":70,"period":14}
+- rsi_recovering: {"type":"rsi_recovering","period":14}
+- rsi_falling: {"type":"rsi_falling","period":14}
+- price_near_level: {"type":"price_near_level","price":85000,"tol_pct":0.5}
+- price_breakout_above: {"type":"price_breakout_above","price":85000}
+- price_breakdown_below: {"type":"price_breakdown_below","price":85000}
+- price_above_ema: {"type":"price_above_ema","period":50}
+- price_below_ema: {"type":"price_below_ema","period":50}
+- bollinger_squeeze: {"type":"bollinger_squeeze","threshold":0.05}
+- bollinger_expansion: {"type":"bollinger_expansion","threshold":0.08}
+- volume_spike: {"type":"volume_spike","multiplier":2.0}
+- macd_cross_bullish: {"type":"macd_cross_bullish"}
+- macd_cross_bearish: {"type":"macd_cross_bearish"}
+- funding_below: {"type":"funding_below","value":0.0001}
+- funding_above: {"type":"funding_above","value":-0.0001}
+- candle_hammer: {"type":"candle_hammer"}
+- candle_doji: {"type":"candle_doji"}
+- candle_engulfing_bullish: {"type":"candle_engulfing_bullish"}
+- candle_engulfing_bearish: {"type":"candle_engulfing_bearish"}
+
+## 중요 규칙
+1. conditions 배열은 위 타입만 사용 (다른 타입 불가)
+2. price_near_level 등 가격 기반 조건의 price는 차트 Y축 눈금에서 읽거나, 읽을 수 없으면 omit
+3. 가격 눈금이 없는 경우 price_near_level 대신 rsi, ema, candle 조건을 우선 사용
+4. 반드시 유효한 JSON만 반환 (마크다운 코드블록 없이 JSON만)
+
+## 응답 형식
+{
+  "pattern_name": "패턴명 (한국어)",
+  "description": "패턴 설명 (1~2문장)",
+  "direction": "LONG",
+  "conditions": [...],
+  "conditions_logic": "AND",
+  "tp_pct": 3.0,
+  "sl_pct": 1.5,
+  "regime_filter": ["BTC_SIDEWAYS", "BTC_BULLISH"],
+  "min_confidence": 0.65,
+  "cooldown_hours": 4,
+  "warnings": ["주의사항 목록"],
+  "confidence_note": "신뢰도 판단 이유"
+}"""
+
+    @app.post("/api/image-pattern/analyze")
+    async def api_image_pattern_analyze(
+        file: UploadFile = File(...),
+        symbol: str      = Form("ALL"),
+        timeframe: str   = Form("1h"),
+        description: str = Form(""),
+    ):
+        """
+        차트 이미지를 업로드하면 연결된 AI(OpenClaw)가 분석하여
+        조건 JSON을 반환합니다. (저장은 하지 않음 — 사전 검토용)
+        """
+        if engine is None or not hasattr(engine, "_claude") or engine._claude is None:
+            raise HTTPException(status_code=503, detail="AI(OpenClaw) 연결 안 됨")
+
+        # 파일 유효성 검사
+        content_type = file.content_type or ""
+        if not content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail="이미지 파일만 허용됩니다 (PNG/JPEG/WEBP)")
+        max_size = 10 * 1024 * 1024  # 10 MB
+        image_bytes = await file.read()
+        if len(image_bytes) > max_size:
+            raise HTTPException(status_code=413, detail="이미지 크기 10MB 초과")
+
+        user_prompt = (
+            f"심볼: {symbol}, 타임프레임: {timeframe}\n"
+            f"사용자 추가 설명: {description or '없음'}\n\n"
+            f"{_CHART_ANALYSIS_PROMPT}"
+        )
+
+        try:
+            raw = await engine._claude.analyze_image(
+                image_bytes = image_bytes,
+                text_prompt = user_prompt,
+                mime_type   = content_type,
+                max_tokens  = 2000,
+            )
+        except Exception as exc:
+            logger.error("[ImagePattern] AI analyze error: %s", exc)
+            raise HTTPException(status_code=500, detail=f"AI 분석 오류: {exc}")
+
+        # JSON 파싱 시도 (마크다운 펜스 제거)
+        import re as _re
+        cleaned = _re.sub(r"```(?:json)?|```", "", raw).strip()
+        try:
+            parsed = json.loads(cleaned)
+        except Exception:
+            # 파싱 실패 시 raw 텍스트를 그대로 반환 (프론트에서 처리)
+            return JSONResponse({"ok": False, "raw": raw, "error": "JSON 파싱 실패"})
+
+        # image_b64 썸네일 (최대 200KB 로 축소 — 원본이 크면 skip)
+        import base64 as _b64
+        img_b64 = None
+        if len(image_bytes) <= 200 * 1024:
+            img_b64 = _b64.b64encode(image_bytes).decode("utf-8")
+
+        return JSONResponse({
+            "ok":       True,
+            "analysis": parsed,
+            "image_b64": img_b64,
+            "content_type": content_type,
+        })
+
+    @app.post("/api/image-pattern/save")
+    async def api_image_pattern_save(request: Request):
+        """분석 결과를 승인하여 전략으로 저장."""
+        import uuid as _uuid
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+        analysis    = body.get("analysis", {})
+        symbol      = body.get("symbol", "ALL")
+        timeframe   = body.get("interval", "1h")
+        image_b64   = body.get("image_b64")
+        content_type = body.get("content_type", "image/png")
+
+        if not analysis:
+            raise HTTPException(status_code=400, detail="analysis 필드 누락")
+
+        import json as _json
+        pattern = {
+            "id":               str(_uuid.uuid4()),
+            "created_at":       int(time.time() * 1000),
+            "pattern_name":     analysis.get("pattern_name", "Custom Pattern"),
+            "description":      analysis.get("description", ""),
+            "symbol":           symbol,
+            "interval":         timeframe,
+            "direction":        analysis.get("direction", "LONG"),
+            "conditions_json":  _json.dumps(analysis.get("conditions", []), ensure_ascii=False),
+            "conditions_logic": analysis.get("conditions_logic", "AND"),
+            "tp_pct":           float(analysis.get("tp_pct", 3.0)),
+            "sl_pct":           float(analysis.get("sl_pct", 1.5)),
+            "regime_filter_json": (
+                _json.dumps(analysis.get("regime_filter", []), ensure_ascii=False)
+                if analysis.get("regime_filter") else None
+            ),
+            "min_confidence":   float(analysis.get("min_confidence", 0.65)),
+            "cooldown_hours":   float(analysis.get("cooldown_hours", 4.0)),
+            "enabled":          1,
+            "image_b64":        image_b64,
+            "ai_warnings_json": (
+                _json.dumps(analysis.get("warnings", []), ensure_ascii=False)
+                if analysis.get("warnings") else None
+            ),
+            "confidence_note":  analysis.get("confidence_note", ""),
+        }
+        store.save_image_pattern(pattern)
+
+        # ImagePatternStrategy 캐시 무효화
+        if strategy_manager is not None:
+            ip_strat = getattr(strategy_manager, "_image_pattern_strategy", None)
+            if ip_strat is not None:
+                ip_strat.invalidate_cache()
+
+        logger.info("[ImagePattern] Saved pattern '%s' (id=%s)", pattern["pattern_name"], pattern["id"])
+        return JSONResponse({"ok": True, "id": pattern["id"]})
+
+    @app.get("/api/image-patterns")
+    async def api_list_image_patterns():
+        """저장된 이미지 패턴 목록 반환."""
+        patterns = store.get_all_image_patterns()
+        # image_b64는 목록에서 제외 (크기 절약)
+        for p in patterns:
+            p.pop("image_b64", None)
+        return JSONResponse(patterns)
+
+    @app.patch("/api/image-pattern/{pattern_id}/toggle")
+    async def api_toggle_image_pattern(pattern_id: str):
+        """패턴 활성화/비활성화 토글."""
+        patterns = store.get_all_image_patterns()
+        pat = next((p for p in patterns if p["id"] == pattern_id), None)
+        if not pat:
+            raise HTTPException(status_code=404, detail="패턴을 찾을 수 없음")
+        new_enabled = 0 if pat.get("enabled", 1) else 1
+        store.update_image_pattern(pattern_id, {"enabled": new_enabled})
+        if strategy_manager is not None:
+            ip_strat = getattr(strategy_manager, "_image_pattern_strategy", None)
+            if ip_strat:
+                ip_strat.invalidate_cache()
+        return JSONResponse({"ok": True, "enabled": new_enabled})
+
+    @app.delete("/api/image-pattern/{pattern_id}")
+    async def api_delete_image_pattern(pattern_id: str):
+        """패턴 삭제."""
+        ok = store.delete_image_pattern(pattern_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="패턴을 찾을 수 없음")
+        if strategy_manager is not None:
+            ip_strat = getattr(strategy_manager, "_image_pattern_strategy", None)
+            if ip_strat:
+                ip_strat.invalidate_cache()
+        return JSONResponse({"ok": True})
+
+    @app.get("/api/image-pattern/{pattern_id}/image")
+    async def api_image_pattern_image(pattern_id: str):
+        """패턴에 첨부된 차트 이미지 반환 (base64)."""
+        try:
+            row = store._conn.execute(
+                "SELECT image_b64, confidence_note FROM image_patterns WHERE id = ?",
+                (pattern_id,)
+            ).fetchone()
+        except Exception:
+            row = None
+        if not row or not row["image_b64"]:
+            raise HTTPException(status_code=404, detail="이미지 없음")
+        return JSONResponse({
+            "image_b64":       row["image_b64"],
+            "confidence_note": row["confidence_note"],
+        })
 
     @app.get("/api/universe")
     async def api_universe():

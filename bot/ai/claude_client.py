@@ -11,7 +11,9 @@ IMPORTANT:
   - All trade execution remains deterministic and rule-based.
 """
 
+import base64
 import logging
+import mimetypes
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -100,3 +102,50 @@ class ClaudeClient:
 
     async def analyze_daily(self, prompt: str) -> str:
         return await self.analyze(prompt, max_tokens=MAX_TOKENS_DAILY)
+
+    async def analyze_image(
+        self,
+        image_bytes: bytes,
+        text_prompt: str,
+        mime_type: str = "image/png",
+        system: Optional[str] = None,
+        max_tokens: int = 2000,
+    ) -> str:
+        """
+        Send an image + text prompt to the AI via OpenAI-compatible vision API.
+        image_bytes : raw image file bytes
+        mime_type   : 'image/png' | 'image/jpeg' | 'image/webp'
+        Returns the AI response string, or an error placeholder.
+        """
+        if not await self.is_available():
+            return "[AI unavailable — OpenClaw not connected or AI_ENABLED=false]"
+
+        b64 = base64.b64encode(image_bytes).decode("utf-8")
+        data_url = f"data:{mime_type};base64,{b64}"
+
+        system_prompt = system or DEFAULT_SYSTEM
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": data_url, "detail": "high"},
+                    },
+                    {"type": "text", "text": text_prompt},
+                ],
+            },
+        ]
+
+        try:
+            resp = await self._client.chat.completions.create(
+                model=f"openclaw:{self._agent_id}",
+                messages=messages,
+                max_tokens=max_tokens,
+            )
+            content = resp.choices[0].message.content
+            return content or "[AI returned empty response]"
+        except Exception as exc:
+            logger.error("OpenClaw vision API call failed: %s", exc)
+            return f"[Vision analysis unavailable: {type(exc).__name__}: {exc}]"

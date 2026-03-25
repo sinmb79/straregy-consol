@@ -1861,3 +1861,177 @@ details[open] .history-summary::before {
   transform: translateX(18px);
   background: #000;
 }
+
+/* ============================================================
+   Image Pattern Strategy Panel
+   ============================================================ */
+.ipt-upload-section {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 16px;
+}
+@media (max-width: 768px) {
+  .ipt-upload-section { grid-template-columns: 1fr; }
+}
+
+.ipt-dropzone {
+  border: 2px dashed var(--border-bright);
+  border-radius: var(--radius-md);
+  min-height: 180px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+  padding: 16px;
+  background: var(--bg-card);
+  text-align: center;
+}
+.ipt-dropzone:hover, .ipt-dropzone.drag-over {
+  border-color: var(--accent-blue);
+  background: var(--bg-card-hover);
+}
+
+.ipt-form { display: flex; flex-direction: column; gap: 10px; }
+.ipt-form-row { display: flex; align-items: center; gap: 10px; }
+.ipt-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  min-width: 80px;
+}
+
+.ipt-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 8px;
+}
+
+.ipt-result-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+}
+.ipt-result-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+.ipt-result-card .ipt-label { display: block; margin-bottom: 4px; }
+.ipt-result-card .ipt-val {
+  font-family: var(--font-mono);
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.ipt-condition-item {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  margin-bottom: 6px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ipt-condition-type {
+  color: var(--accent-cyan);
+  font-weight: 700;
+  min-width: 160px;
+}
+.ipt-condition-params { color: var(--text-secondary); }
+
+.ipt-pattern-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+.ipt-pattern-card.disabled { opacity: 0.45; }
+.ipt-pattern-thumbnail {
+  width: 80px;
+  height: 60px;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+  background: var(--bg-secondary);
+}
+.ipt-pattern-info { flex: 1; min-width: 0; }
+.ipt-pattern-name {
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ipt-pattern-desc {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+.ipt-pattern-meta {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+.ipt-pattern-actions { display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; }
+
+/* ============================================================
+   Paper Performance Panel
+   ============================================================ */
+.perf-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.perf-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.perf-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.perf-value {
+  font-family: var(--font-mono);
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-primary);
+  line-height: 1.2;
+}
+
+.perf-sub {
+  font-size: 11px;
+  color: var(--text-secondary);
+}

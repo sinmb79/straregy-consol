@@ -2,21 +2,31 @@
 # 22B Strategy Engine — .gitignore
 # ============================================================
 
-# Claude Code local settings — 올리면 안 됨
+# ─── Claude Code local settings ─────────────────────────────
 .claude/
 
-# Environment / secrets — 절대 올리면 안 됨
+# ─── Secrets / Credentials — NEVER commit ───────────────────
 .env
 .env.*
 *.env
+secrets.json
+credentials.json
+*.pem
+*.key
 
-# Database / runtime data — 실거래 데이터 포함 (코드 아님)
+# ─── Internal planning / design documents ───────────────────
+# (*.txt 내부 기획문서 — 코드가 아님)
+*.txt
+!requirements*.txt
+
+# ─── Database / runtime data ────────────────────────────────
+# 실거래 데이터, 백테스트 DB, 런타임 파라미터 포함 — 코드 아님
 /data/
 *.db
 *.sqlite
 *.sqlite3
 
-# Python cache
+# ─── Python cache ────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.pyo
@@ -26,20 +36,24 @@ dist/
 build/
 .eggs/
 
-# Virtual environments
+# ─── Virtual environments ────────────────────────────────────
 venv/
 .venv/
 env/
 .env_backup
 
-# Logs
+# ─── Logs ───────────────────────────────────────────────────
 *.log
 logs/
 
-# Cloudflare tunnel binary
+# ─── Binary / large files ───────────────────────────────────
 cloudflared.exe
+*.exe
+*.dll
+*.so
+*.dylib
 
-# OS / editor files
+# ─── OS / editor ────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 desktop.ini
@@ -48,9 +62,8 @@ desktop.ini
 *.suo
 *.user
 
-# Windows local paths / task files
-*.bat.local
+# ─── Windows scripts (personal / machine-specific) ──────────
 start_silent.vbs
 
-# Jupyter
+# ─── Jupyter ─────────────────────────────────────────────────
 .ipynb_checkpoints/

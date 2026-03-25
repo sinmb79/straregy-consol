@@ -512,6 +512,87 @@
   </div>
 
   <!-- -------------------------------------------------------- -->
+  <!-- PANEL: PAPER PERFORMANCE                                  -->
+  <!-- -------------------------------------------------------- -->
+  <div class="panel" id="panel-paper-performance">
+    <div class="panel-header">
+      <span class="panel-title">
+        <span class="panel-title-icon">📊</span>
+        Paper Trading Performance
+        <span class="badge badge-mode-limited" style="margin-left:8px">PAPER</span>
+      </span>
+      <div style="display:flex;align-items:center;gap:12px">
+        <label style="font-size:12px;color:var(--text-muted)">
+          기준 자본
+          <input id="perf-capital-input" type="number" value="1000" min="100" step="100"
+            style="width:80px;background:var(--bg-card);border:1px solid var(--border);
+                   color:var(--text-primary);padding:2px 8px;border-radius:4px;
+                   font-family:var(--font-mono);font-size:12px;margin:0 4px;"
+            onchange="refreshPerformance()" />
+          USDT
+        </label>
+        <button class="btn-sm" onclick="refreshPerformance()">↻</button>
+      </div>
+    </div>
+
+    <!-- Summary cards -->
+    <div class="perf-grid">
+      <div class="perf-card">
+        <div class="perf-label">승률 (Win Rate)</div>
+        <div class="perf-value" id="perf-win-rate">—</div>
+        <div class="perf-sub"  id="perf-win-loss">— 승 / — 패</div>
+      </div>
+      <div class="perf-card">
+        <div class="perf-label">총 거래수</div>
+        <div class="perf-value" id="perf-total-trades">—</div>
+        <div class="perf-sub"  id="perf-trade-sub">paper trades</div>
+      </div>
+      <div class="perf-card">
+        <div class="perf-label">순 손익 (Net P&L)</div>
+        <div class="perf-value" id="perf-net-pnl-usd">—</div>
+        <div class="perf-sub"  id="perf-net-pnl-pct">—</div>
+      </div>
+      <div class="perf-card">
+        <div class="perf-label">최종 잔고 (Final Balance)</div>
+        <div class="perf-value" id="perf-final-balance">—</div>
+        <div class="perf-sub"  id="perf-capital-sub">$1,000 기준</div>
+      </div>
+      <div class="perf-card">
+        <div class="perf-label">손익비 (Profit Factor)</div>
+        <div class="perf-value" id="perf-profit-factor">—</div>
+        <div class="perf-sub">≥ 1.5 권장</div>
+      </div>
+      <div class="perf-card">
+        <div class="perf-label">최대 낙폭 (Max DD)</div>
+        <div class="perf-value" id="perf-max-dd">—</div>
+        <div class="perf-sub"  id="perf-expectancy">기대값: —</div>
+      </div>
+    </div>
+
+    <!-- Per-strategy breakdown -->
+    <div class="signals-table-wrapper" style="margin-top:16px">
+      <table class="signals-table">
+        <thead>
+          <tr>
+            <th>전략</th>
+            <th style="text-align:center">거래수</th>
+            <th style="text-align:center">승 / 패</th>
+            <th style="text-align:center">승률</th>
+            <th style="text-align:right">평균 수익%</th>
+            <th style="text-align:right">평균 손실%</th>
+            <th style="text-align:right">순 손익 ($)</th>
+          </tr>
+        </thead>
+        <tbody id="perf-strategy-tbody">
+          <tr class="signals-empty-row">
+            <td colspan="7">거래 기록 없음 — 전략이 포지션을 닫으면 표시됩니다</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- -------------------------------------------------------- -->
   <!-- PANEL 5: TRADE LOG                                        -->
   <!-- -------------------------------------------------------- -->
   <div class="panel" id="panel-trade-log">
@@ -640,6 +721,104 @@
 
   </div>
 
+
+  <!-- -------------------------------------------------------- -->
+  <!-- PANEL: IMAGE PATTERN STRATEGY                             -->
+  <!-- -------------------------------------------------------- -->
+  <div class="panel" id="panel-image-pattern" style="margin-top:20px">
+    <div class="panel-header">
+      <span class="panel-title">
+        <span class="panel-title-icon">🖼️</span>
+        이미지 패턴 전략
+        <span class="badge badge-mode-limited" style="margin-left:8px">AI 분석</span>
+      </span>
+      <span class="panel-subtitle">차트 캡쳐 이미지 업로드 → AI 분석 → 자동매매 전략 생성</span>
+    </div>
+
+    <!-- 업로드 영역 -->
+    <div class="ipt-upload-section">
+      <div class="ipt-dropzone" id="ipt-dropzone"
+           ondragover="iptDragOver(event)" ondragleave="iptDragLeave(event)" ondrop="iptDrop(event)"
+           onclick="document.getElementById('ipt-file-input').click()">
+        <div id="ipt-preview-wrap" style="display:none">
+          <img id="ipt-preview-img" style="max-height:220px;max-width:100%;border-radius:6px;object-fit:contain" />
+        </div>
+        <div id="ipt-dropzone-hint">
+          <div style="font-size:32px;margin-bottom:8px">📷</div>
+          <div style="font-size:13px;color:var(--text-secondary)">차트 이미지를 드래그하거나 클릭하여 업로드</div>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:4px">PNG / JPEG / WEBP · 최대 10MB</div>
+        </div>
+        <input type="file" id="ipt-file-input" accept="image/*" style="display:none" onchange="iptFileSelected(event)" />
+      </div>
+
+      <div class="ipt-form">
+        <div class="ipt-form-row">
+          <label class="ipt-label">심볼</label>
+          <select id="ipt-symbol" class="filter-select">
+            <option value="ALL">ALL (전체 추적 심볼)</option>
+            {% for symbol in tracked_symbols %}
+            <option value="{{ symbol }}">{{ symbol }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="ipt-form-row">
+          <label class="ipt-label">타임프레임</label>
+          <select id="ipt-timeframe" class="filter-select">
+            <option value="1h">1H</option>
+            <option value="4h">4H</option>
+            <option value="15m">15M</option>
+            <option value="1d">1D</option>
+          </select>
+        </div>
+        <div class="ipt-form-row" style="flex-direction:column;align-items:flex-start;gap:6px">
+          <label class="ipt-label">추가 설명 (선택)</label>
+          <textarea id="ipt-description" rows="2" placeholder="예: RSI 다이버전스 + 지지선 반등 패턴, 이 구간에서 매수 진입"
+            style="width:100%;background:var(--bg-card);border:1px solid var(--border);color:var(--text-primary);
+                   padding:8px;border-radius:var(--radius-sm);font-size:12px;font-family:var(--font-sans);resize:vertical"></textarea>
+        </div>
+        <button class="mode-btn" id="ipt-analyze-btn" onclick="iptAnalyze()" style="margin-top:8px" disabled>
+          🤖 AI 분석 시작
+        </button>
+      </div>
+    </div>
+
+    <!-- 분석 결과 -->
+    <div id="ipt-result-section" style="display:none;margin-top:20px">
+      <div class="ipt-section-title">AI 분석 결과</div>
+
+      <div class="ipt-result-grid" id="ipt-result-grid">
+        <!-- 동적으로 채워짐 -->
+      </div>
+
+      <div style="margin-top:12px">
+        <div class="ipt-label">조건 목록 <span id="ipt-logic-badge" class="badge badge-mode-limited" style="margin-left:4px">AND</span></div>
+        <div id="ipt-conditions-list" style="margin-top:8px"></div>
+      </div>
+
+      <div id="ipt-warnings-section" style="display:none;margin-top:12px">
+        <div class="ipt-label" style="color:var(--yellow)">⚠ AI 경고</div>
+        <ul id="ipt-warnings-list" style="margin-top:6px;padding-left:16px;font-size:12px;color:var(--yellow)"></ul>
+      </div>
+
+      <div style="display:flex;gap:10px;margin-top:16px">
+        <button class="mode-btn mode-btn-safe" id="ipt-save-btn" onclick="iptSave()">✅ 전략으로 저장</button>
+        <button class="mode-btn mode-btn-muted" onclick="iptReset()">✕ 취소</button>
+      </div>
+    </div>
+
+    <!-- 저장된 패턴 목록 -->
+    <div style="margin-top:24px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+        <div class="ipt-section-title">활성화된 패턴 전략</div>
+        <button class="btn-sm" onclick="iptLoadPatterns()">↻ 새로고침</button>
+      </div>
+      <div id="ipt-patterns-list">
+        <div class="text-muted" style="font-size:12px;padding:16px;text-align:center">
+          저장된 패턴이 없습니다
+        </div>
+      </div>
+    </div>
+  </div>
 
   <!-- -------------------------------------------------------- -->
   <!-- SETTINGS PANEL                                            -->
