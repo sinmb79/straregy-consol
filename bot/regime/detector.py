@@ -122,6 +122,13 @@ class RegimeDetector:
         """Manually flag EVENT_RISK (e.g., detected maintenance window)."""
         self._event_risk_active = active
 
+    def detect_bot_regime(self) -> dict:
+        """
+        항상 봇의 규칙 기반 레짐을 계산해 반환한다.
+        사용자 오버라이드와 무관하게 봇 판단을 알고 싶을 때 사용.
+        """
+        return self._run_detection()
+
     def compute_indicators(self, symbol: str, interval: str) -> Optional[dict]:
         """
         Compute EMA50, ATR, RSI, BB, VWAP for the given symbol/interval.
@@ -177,16 +184,40 @@ class RegimeDetector:
         """
         Run all regime rules and return the winning regime + indicator snapshot.
 
+        사용자 오버라이드가 있으면 `regime` 필드를 오버라이드 값으로 교체하되
+        봇의 판단은 `bot_regime` 필드로 함께 포함한다.
+
         Returns a dict:
         {
             "ts": unix ms,
-            "regime": "BTC_BULLISH",
+            "regime": "BTC_BULLISH",        # 실제 사용 레짐 (오버라이드 or 봇)
+            "bot_regime": "BTC_BEARISH",    # 봇의 규칙 기반 판단 (항상 포함)
+            "user_override": True/False,    # 오버라이드 활성 여부
             "allowed_strategies": [...],
             "btc_price": ...,
-            "btc_ema50": ...,
             ...
         }
         """
+        result = self._run_detection()
+
+        # 사용자 오버라이드 확인
+        override = self._store.get_regime_override() if hasattr(self._store, "get_regime_override") else None
+        result["bot_regime"] = result["regime"]
+        result["user_override"] = False
+
+        if override and override in [r.value for r in Regime]:
+            result["regime"] = override
+            result["user_override"] = True
+            result["allowed_strategies"] = REGIME_ALLOW_TABLE.get(override, [])
+            result["new_entry_allowed"] = override not in (
+                Regime.EVENT_RISK.value, Regime.UNKNOWN.value
+            )
+            logger.info("[RegimeDetector] User override active: %s (bot: %s)", override, result["bot_regime"])
+
+        return result
+
+    def _run_detection(self) -> dict:
+        """봇 규칙 기반 레짐 계산 (오버라이드 무시)."""
         ts = int(time.time() * 1000)
 
         # EVENT_RISK has highest priority

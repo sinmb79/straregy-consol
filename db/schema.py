@@ -373,6 +373,13 @@ PHASE3_MIGRATIONS = [
     "ALTER TABLE orders ADD COLUMN error TEXT",
 ]
 
+# v1.4 migrations — Time Stop + Break-even SL
+V14_MIGRATIONS = [
+    "ALTER TABLE paper_positions ADD COLUMN expiry_ts INTEGER",
+    "ALTER TABLE paper_positions ADD COLUMN time_stop_policy TEXT",
+    "ALTER TABLE paper_positions ADD COLUMN be_stop_activated INTEGER DEFAULT 0",
+]
+
 
 # --------------------------------------------------------------------------- #
 # Public helpers
@@ -406,8 +413,8 @@ def init_db(db_path: str) -> sqlite3.Connection:
     except Exception:
         pass
 
-    # Phase 3 + v1.3 migrations (safe — ignore errors for columns that already exist)
-    for migration in PHASE3_MIGRATIONS + V13_MIGRATIONS:
+    # Phase 3 + v1.3 + v1.4 migrations (safe — ignore errors for columns that already exist)
+    for migration in PHASE3_MIGRATIONS + V13_MIGRATIONS + V14_MIGRATIONS:
         try:
             cursor.execute(migration)
             conn.commit()

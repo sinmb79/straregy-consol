@@ -77,6 +77,29 @@ class BinanceCollector:
             await self._http.aclose()
         logger.info("BinanceCollector stopped.")
 
+    async def reconnect(self) -> None:
+        """Restart all connections with current config (e.g. after testnet/mainnet toggle)."""
+        logger.info(
+            "BinanceCollector reconnecting (testnet=%s) …", self._config.binance_testnet
+        )
+        # Cancel running tasks
+        for task in self._tasks:
+            task.cancel()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+        # Recreate HTTP client with new base URL
+        if self._http:
+            await self._http.aclose()
+        self._http = httpx.AsyncClient(
+            base_url=self._config.binance_rest_base,
+            timeout=REST_TIMEOUT,
+        )
+        # Restart tasks
+        self._tasks = [
+            asyncio.create_task(self._rest_poller(), name="rest_poller"),
+            asyncio.create_task(self._ws_mini_ticker(), name="ws_mini_ticker"),
+        ]
+        logger.info("BinanceCollector reconnected.")
+
     # ---------------------------------------------------------------------- #
     # Historical REST fetch
     # ---------------------------------------------------------------------- #
@@ -183,10 +206,10 @@ class BinanceCollector:
 
     async def _ws_mini_ticker(self) -> None:
         """Subscribe to !miniTicker@arr for real-time price updates."""
-        url = f"{self._config.binance_ws_base}/stream?streams=!miniTicker@arr"
-        symbols_set = set(self._config.tracked_symbols)
-
         while self._running:
+            # Re-evaluate URL each iteration so testnet toggle takes effect on reconnect
+            url = f"{self._config.binance_ws_base}/stream?streams=!miniTicker@arr"
+            symbols_set = set(self._config.tracked_symbols)
             try:
                 logger.info("WebSocket connecting: %s", url)
                 async with websockets.connect(url, ping_interval=20, ping_timeout=30) as ws:

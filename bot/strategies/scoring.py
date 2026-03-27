@@ -62,6 +62,8 @@ class ScoringEngine:
     PENALTY_DUPLICATE_DIR  = -2   # 30분 내 동일 방향 중복
     PENALTY_EVENT_RISK     = -4   # event risk 구간
     PENALTY_UNKNOWN_DATA   = -3   # UNKNOWN / 불완전 데이터
+    SCORE_MTF_ALIGNED      = 2    # 4H 컨텍스트와 신호 방향 일치
+    PENALTY_MTF_CONFLICT   = -2   # 4H 컨텍스트와 신호 방향 충돌
 
     # 동일 방향 중복 탐지 윈도우 (ms)
     DUPLICATE_WINDOW_MS = 30 * 60 * 1000   # 30분
@@ -143,6 +145,15 @@ class ScoringEngine:
             total += self.PENALTY_UNKNOWN_DATA
             breakdown["unknown_data"] = self.PENALTY_UNKNOWN_DATA
 
+        # ── ±2  4H 멀티타임프레임 컨텍스트 정합성 ────────────────────────── #
+        mtf_score = self._score_mtf_alignment(opp, regime)
+        if mtf_score > 0:
+            total += mtf_score
+            breakdown["mtf_aligned"] = mtf_score
+        elif mtf_score < 0:
+            total += mtf_score
+            breakdown["mtf_conflict"] = mtf_score
+
         opp.score_total    = total
         opp.score_breakdown = breakdown
 
@@ -171,17 +182,50 @@ class ScoringEngine:
         return False
 
     def _score_regime_alignment(self, opp: "Opportunity", regime: dict) -> bool:
-        """카테고리와 레짐의 방향성이 일치하면 보너스."""
+        """카테고리 + 방향(side)과 레짐의 방향성이 일치하면 보너스."""
         r = regime.get("regime", "UNKNOWN")
         if r in ("EVENT_RISK", "UNKNOWN"):
             return False
+
+        # ── reversal ────────────────────────────────────────────────────── #
         if opp.category == "reversal":
-            # Reversal은 극단적 레짐에서 작동
-            return r in ("BTC_BEARISH", "BTC_SIDEWAYS", "HIGH_VOLATILITY", "ALT_ROTATION")
+            # BTC_BEARISH에서는 SHORT reversal만 레짐 정합
+            # (하락장에서 LONG 역추세는 고위험 — 보너스 미부여)
+            if r == "BTC_BEARISH":
+                return opp.side == "SHORT"
+            # BTC_BULLISH에서는 SHORT reversal만 정합
+            if r == "BTC_BULLISH":
+                return opp.side == "SHORT"
+            return r in ("BTC_SIDEWAYS", "HIGH_VOLATILITY", "ALT_ROTATION")
+
+        # ── breakout ────────────────────────────────────────────────────── #
         if opp.category == "breakout":
             return r in ("BTC_BULLISH", "LOW_VOLATILITY", "BTC_SIDEWAYS")
+
+        # ── trend (LONG 추세) ────────────────────────────────────────────── #
         if opp.category == "trend":
             return r in ("BTC_BULLISH", "ALT_ROTATION")
+
+        # ── bear_trend (SHORT 추세 — 신규) ──────────────────────────────── #
+        if opp.category == "bear_trend":
+            if r == "BTC_BEARISH":
+                return opp.side == "SHORT"   # SHORT만 레짐 정합
+            if r == "HIGH_VOLATILITY":
+                return True   # 양방향 허용 (LONG 반전도 HV에서 의미)
+            return False
+
+        # ── range (박스권 양방향 — 신규) ────────────────────────────────── #
+        if opp.category == "range":
+            return r == "BTC_SIDEWAYS"
+
+        # ── volatility (변동성 모멘텀 — 신규) ───────────────────────────── #
+        if opp.category == "volatility":
+            return r == "HIGH_VOLATILITY"
+
+        # ── pattern ─────────────────────────────────────────────────────── #
+        if opp.category == "pattern":
+            return r not in ("EVENT_RISK", "UNKNOWN")
+
         return False
 
     def _is_oversaturated(
@@ -217,3 +261,46 @@ class ScoringEngine:
         if opp.liquidity_state == "CRITICAL":
             return True
         return False
+
+    def _score_mtf_alignment(self, opp: "Opportunity", regime: dict) -> int:
+        """
+        4H 컨텍스트(regime 지표)와 신호 방향의 정합성 점수.
+        btc_price > btc_ema50 → 4H 상승 컨텍스트
+        btc_price < btc_ema50 → 4H 하락 컨텍스트
+        Returns: +2 (aligned), 0 (neutral/unclear), -2 (conflict)
+        """
+        btc_price = regime.get("btc_price")
+        btc_ema50 = regime.get("btc_ema50")
+        if btc_price is None or btc_ema50 is None or btc_ema50 == 0:
+            return 0
+
+        four_h_bullish = btc_price > btc_ema50
+        signal_long = opp.side == "LONG"
+
+        # trend/breakout/bear_trend: 4H 방향과 일치해야 유리
+        if opp.category in ("trend", "breakout", "bear_trend"):
+            if four_h_bullish and signal_long:
+                return self.SCORE_MTF_ALIGNED
+            if not four_h_bullish and not signal_long:
+                return self.SCORE_MTF_ALIGNED
+            return self.PENALTY_MTF_CONFLICT
+
+        # reversal: 역방향이 맞음 (4H 하락 + LONG = 반등 포착)
+        if opp.category == "reversal":
+            if not four_h_bullish and signal_long:
+                return self.SCORE_MTF_ALIGNED
+            if four_h_bullish and not signal_long:
+                return self.SCORE_MTF_ALIGNED
+            return self.PENALTY_MTF_CONFLICT
+
+        # range: 4H 방향 무관 (박스 안에서 양방향 모두 유효)
+        # volatility: 4H 방향과 일치하면 가산
+        if opp.category == "volatility":
+            if four_h_bullish and signal_long:
+                return self.SCORE_MTF_ALIGNED
+            if not four_h_bullish and not signal_long:
+                return self.SCORE_MTF_ALIGNED
+            return 0   # 충돌해도 감점 없음 (변동성은 방향 무관할 수 있음)
+
+        # pattern/range: 중립
+        return 0

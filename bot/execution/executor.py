@@ -414,8 +414,9 @@ class Executor:
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code in (400, 401):
                 logger.warning(
-                    "[Executor] get_open_positions unavailable (%d) — API key not authorized.",
+                    "[Executor] get_open_positions unavailable (%d) — API key not authorized. Binance: %s",
                     exc.response.status_code,
+                    exc.response.text,
                 )
             else:
                 logger.error("[Executor] get_open_positions error: %s", exc)

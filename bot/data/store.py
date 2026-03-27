@@ -51,6 +51,12 @@ class DataStore:
         self._daily_pnl: float = 0.0
         self._exposure_pct: float = 0.0
 
+        # User control settings (runtime, not persisted to DB)
+        # exchange_mode: "BOTH" | "BINANCE_ONLY" | "HYPERLIQUID_ONLY"
+        self._exchange_mode: str = "BOTH"
+        # regime_override: None = auto, or one of the Regime enum strings
+        self._regime_override: Optional[str] = None
+
         # WebSocket subscribers for dashboard push
         # Each subscriber is an asyncio.Queue
         self._subscribers: List[asyncio.Queue] = []
@@ -97,6 +103,27 @@ class DataStore:
     def set_exchange_status(self, ok: bool) -> None:
         self._exchange_ok = ok
         self._broadcast("exchange_status", {"ok": ok})
+
+    # Exchange mode (user control)
+    def set_exchange_mode(self, mode: str) -> None:
+        """BOTH | BINANCE_ONLY | HYPERLIQUID_ONLY"""
+        valid = {"BOTH", "BINANCE_ONLY", "HYPERLIQUID_ONLY"}
+        if mode not in valid:
+            raise ValueError(f"Invalid exchange_mode: {mode}")
+        self._exchange_mode = mode
+        self._broadcast("exchange_mode", {"mode": mode})
+
+    def get_exchange_mode(self) -> str:
+        return self._exchange_mode
+
+    # Regime override (user control)
+    def set_regime_override(self, regime: Optional[str]) -> None:
+        """Set user manual regime override. None = auto."""
+        self._regime_override = regime
+        self._broadcast("regime_override", {"override": regime})
+
+    def get_regime_override(self) -> Optional[str]:
+        return self._regime_override
 
     def get_exchange_status(self) -> bool:
         return self._exchange_ok
@@ -445,8 +472,9 @@ class DataStore:
                 INSERT OR IGNORE INTO paper_positions
                     (id, strategy, symbol, side, entry_price, qty,
                      tp, sl, opened_at, regime, signal_id, status,
-                     closed_at, exit_price, pnl_pct, close_reason)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     closed_at, exit_price, pnl_pct, close_reason,
+                     expiry_ts, time_stop_policy, be_stop_activated)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     pos.get("id"),
@@ -465,6 +493,9 @@ class DataStore:
                     pos.get("exit_price"),
                     pos.get("pnl_pct"),
                     pos.get("close_reason"),
+                    pos.get("expiry_ts"),
+                    pos.get("time_stop_policy"),
+                    pos.get("be_stop_activated", 0),
                 ),
             )
             self._conn.commit()
@@ -477,7 +508,8 @@ class DataStore:
             return
         # Build dynamic SET clause from provided keys
         allowed_keys = {
-            "status", "closed_at", "exit_price", "pnl_pct", "close_reason"
+            "status", "closed_at", "exit_price", "pnl_pct", "close_reason",
+            "sl", "be_stop_activated",
         }
         fields = {k: v for k, v in updates.items() if k in allowed_keys}
         if not fields:

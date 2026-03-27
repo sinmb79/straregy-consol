@@ -45,14 +45,9 @@ def _get_list(key: str, default: str = "") -> List[str]:
 
 @dataclass
 class Config:
-    # Binance Testnet
+    # Binance (Mainnet only)
     binance_api_key: str = field(default_factory=lambda: _get("BINANCE_API_KEY"))
     binance_api_secret: str = field(default_factory=lambda: _get("BINANCE_API_SECRET"))
-    binance_testnet: bool = field(default_factory=lambda: _get_bool("BINANCE_TESTNET", True))
-
-    # Binance Mainnet
-    binance_mainnet_api_key: str = field(default_factory=lambda: _get("BINANCE_MAINNET_API_KEY"))
-    binance_mainnet_api_secret: str = field(default_factory=lambda: _get("BINANCE_MAINNET_API_SECRET"))
 
     # Hyperliquid
     hyperliquid_wallet_address: str = field(default_factory=lambda: _get("HYPERLIQUID_WALLET_ADDRESS"))
@@ -133,31 +128,23 @@ class Config:
 
     @property
     def binance_rest_base(self) -> str:
-        if self.binance_testnet:
-            return "https://testnet.binancefuture.com"
         return "https://fapi.binance.com"
 
     @property
     def binance_ws_base(self) -> str:
-        if self.binance_testnet:
-            return "wss://stream.binancefuture.com"
         return "wss://fstream.binance.com"
 
     @property
     def active_binance_api_key(self) -> str:
-        if not self.binance_testnet and self.binance_mainnet_api_key:
-            return self.binance_mainnet_api_key
         return self.binance_api_key
 
     @property
     def active_binance_api_secret(self) -> str:
-        if not self.binance_testnet and self.binance_mainnet_api_secret:
-            return self.binance_mainnet_api_secret
         return self.binance_api_secret
 
     def validate(self) -> None:
         if not self.binance_api_key:
-            logger.warning("BINANCE_API_KEY is not set")
+            logger.warning("BINANCE_API_KEY is not set — live orders will fail")
         if not self.telegram_bot_token:
             logger.warning("TELEGRAM_BOT_TOKEN is not set; Telegram alerts disabled")
 

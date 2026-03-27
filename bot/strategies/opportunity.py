@@ -26,7 +26,13 @@ STRATEGY_CATEGORY_MAP: Dict[str, str] = {
     "overreaction_reversal":         "reversal",
     "volatility_expansion_breakout": "breakout",
     "early_trend_capture":           "trend",
-    # 하위 호환 — 구 전략명
+    # image_pattern: 내부 direction에 따라 분기하되 기본값은 "pattern"
+    "image_pattern":                 "pattern",
+    # 신규 전략 (방향성 강화)
+    "bear_trend":                    "bear_trend",
+    "range_trader":                  "range",
+    "volatility_momentum":           "volatility",
+    # 하위 호환 — 구 전략명 (legacy PAUSED)
     "rsi_exhaustion":                "reversal",
     "ema_cross":                     "trend",
     "range_breakout":                "breakout",
@@ -34,9 +40,13 @@ STRATEGY_CATEGORY_MAP: Dict[str, str] = {
 
 # 전략 카테고리별 기본 보유 윈도우
 HOLD_WINDOW_MAP: Dict[str, str] = {
-    "reversal": "30m~4h",
-    "breakout": "15m~3h",
-    "trend":    "1h~6h",
+    "reversal":   "30m~4h",
+    "breakout":   "15m~3h",
+    "trend":      "1h~6h",
+    "pattern":    "1h~4h",
+    "bear_trend": "2h~6h",
+    "range":      "1h~4h",
+    "volatility": "30m~2h",
 }
 
 

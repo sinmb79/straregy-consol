@@ -77,6 +77,26 @@ function addFlash(el, cls = 'flash') {
 }
 
 // ============================================================
+// Time formatting (KST = UTC+9)
+// ============================================================
+const _KST_OPTS_TIME = { timeZone: 'Asia/Seoul', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false };
+const _KST_OPTS_FULL = { timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false };
+
+function fmtKST(val) {
+  if (!val) return '—';
+  const d = (val instanceof Date) ? val : new Date(val);
+  if (isNaN(d)) return '—';
+  return d.toLocaleString('ko-KR', _KST_OPTS_TIME);
+}
+
+function fmtKSTFull(val) {
+  if (!val) return '—';
+  const d = (val instanceof Date) ? val : new Date(val);
+  if (isNaN(d)) return '—';
+  return d.toLocaleString('ko-KR', _KST_OPTS_FULL);
+}
+
+// ============================================================
 // Number formatting
 // ============================================================
 function fmtPrice(v, sym) {
@@ -203,6 +223,9 @@ function handleMessage(msg) {
     case 'daily_review':           handleDailyReview(msg.data);          break;
     case 'daily_alert_count':      handleDailyAlertCount(msg.data);      break;
     case 'recommendation_decided': handleRecommendationDecided(msg.data); break;
+    // User Control events
+    case 'regime_override':        _handleRegimeOverrideEvent(msg.data); break;
+    case 'exchange_mode':          loadExchangeMode();                   break;
     case 'ping':                   /* keepalive — ignore */              break;
     default:
       console.debug('[WS] Unknown message type:', msg.type);
@@ -285,7 +308,7 @@ function updateRegimeDisplay(data) {
   }
 
   // Regime updated time
-  const ts = data.ts ? new Date(data.ts).toLocaleTimeString() : '—';
+  const ts = fmtKST(data.ts);
   setText('regime-updated', ts);
 
   // Regime panel
@@ -386,7 +409,7 @@ function renderSignalsTable() {
   }
 
   tbody.innerHTML = state.signals.map(sig => {
-    const time = sig.ts ? new Date(sig.ts).toLocaleTimeString() : '—';
+    const time = fmtKST(sig.ts);
     const actionCls = sig.action === 'BUY' ? 'action-buy' : sig.action === 'SELL' ? 'action-sell' : 'action-skip';
     const confPct = sig.confidence != null ? Math.round(sig.confidence * 100) : 0;
     const confBar = `
@@ -459,7 +482,7 @@ function renderPositionsTable() {
   }
 
   tbody.innerHTML = state.openPositions.map(pos => {
-    const opened = pos.opened_at ? new Date(pos.opened_at).toLocaleTimeString() : '—';
+    const opened = fmtKST(pos.opened_at);
     const sideCls = pos.side === 'LONG' ? 'action-buy' : 'action-sell';
     return `
       <tr>
@@ -487,7 +510,7 @@ async function refreshStrategyBoard() {
     renderStrategyBoard(strategies);
 
     const updEl = $('strategy-board-updated');
-    if (updEl) updEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+    if (updEl) updEl.textContent = `Updated ${fmtKST(new Date())} KST`;
   } catch (e) {
     console.debug('Strategy board refresh failed:', e);
   }
@@ -514,9 +537,7 @@ function renderStrategyBoard(strategies) {
     const mdd = st.mdd != null ? st.mdd.toFixed(2) + '%' : '—';
     const openCnt = st.open_count || 0;
 
-    const lastTs = s.last_signal_ts
-      ? new Date(s.last_signal_ts).toLocaleTimeString()
-      : '—';
+    const lastTs = fmtKST(s.last_signal_ts);
 
     const wrColor = st.win_rate != null
       ? (st.win_rate >= 0.55 ? 'text-green' : st.win_rate >= 0.45 ? 'text-yellow' : 'text-red')
@@ -830,7 +851,9 @@ function startClock() {
     const el = $('header-clock');
     if (el) {
       const now = new Date();
-      el.textContent = now.toUTCString().slice(17, 25) + ' UTC';
+      const kst = now.toLocaleString('ko-KR', _KST_OPTS_TIME);
+      const utc = now.toUTCString().slice(17, 25);
+      el.textContent = kst + ' KST / ' + utc + ' UTC';
     }
   }
   tick();
@@ -1188,7 +1211,7 @@ function renderTradeLogTable() {
   }
 
   tbody.innerHTML = state.tradeLog.map(trade => {
-    const openTime   = trade.opened_at ? new Date(trade.opened_at).toLocaleDateString() + ' ' + new Date(trade.opened_at).toLocaleTimeString() : '—';
+    const openTime   = fmtKSTFull(trade.opened_at);
     const side       = trade.side || '—';
     const sideCls    = side === 'LONG' ? 'action-buy' : (side === 'SHORT' ? 'action-sell' : 'action-skip');
     const pnl        = trade.pnl_pct != null ? parseFloat(trade.pnl_pct) : null;
@@ -1252,7 +1275,7 @@ async function showAuditTrail(tradeId) {
     }
 
     content.innerHTML = trail.map((entry, idx) => {
-      const ts = entry.ts ? new Date(entry.ts).toLocaleString() : '—';
+      const ts = fmtKSTFull(entry.ts);
       let riskCheck = {};
       try { riskCheck = JSON.parse(entry.risk_check || '{}'); } catch(e) {}
       const fromStatus = riskCheck.from_status || '';
@@ -1310,7 +1333,7 @@ function handleRegimeInterpretation(data) {
   if (!data) return;
   renderRegimeInterpretation(data);
   const updEl = $('ai-panel-updated');
-  if (updEl) updEl.textContent = `AI updated ${new Date().toLocaleTimeString()}`;
+  if (updEl) updEl.textContent = `AI updated ${fmtKST(new Date())} KST`;
   showToast('regime-change', '🤖 AI Regime Analysis',
     `Regime ${data.regime || ''} interpreted`, 4000);
 }
@@ -1333,7 +1356,7 @@ function renderRegimeInterpretation(data) {
   if (stratEl) stratEl.textContent = data.strategy_recommendations || '—';
   const tsEl = $('interp-ts');
   if (tsEl) {
-    const ts = data.timestamp ? new Date(data.timestamp).toLocaleTimeString() : '—';
+    const ts = fmtKST(data.timestamp);
     const aiOk = data.ai_available !== false;
     tsEl.textContent = `${aiOk ? 'AI' : 'Offline'} · ${ts}`;
     tsEl.style.color = aiOk ? 'var(--accent-cyan)' : 'var(--text-muted)';
@@ -1686,13 +1709,6 @@ async function loadSystemHealth() {
     if (modeEl) {
       modeEl.textContent = d.system_mode || '—';
       modeEl.style.color = d.kill_switch ? 'var(--red)' : 'var(--text-primary)';
-    }
-
-    // Network
-    const netEl = $('hval-net');
-    if (netEl) {
-      netEl.textContent = d.testnet ? 'TESTNET' : 'MAINNET';
-      netEl.style.color = d.testnet ? 'var(--yellow)' : 'var(--green)';
     }
 
   } catch (e) {
@@ -2459,3 +2475,255 @@ function renderPerformance(d) {
 // 초기 로드 및 60초마다 갱신
 refreshPerformance();
 setInterval(refreshPerformance, 60000);
+
+// ============================================================
+// USER CONTROL — Regime Override
+// ============================================================
+
+let _currentRegimeOverride = null;  // null = auto
+
+async function loadRegimeOverride() {
+  try {
+    const res = await fetch('/api/regime/override');
+    if (!res.ok) return;
+    const data = await res.json();
+    _currentRegimeOverride = data.override;
+    _updateRegimeOverrideUI(data);
+  } catch(e) {}
+}
+
+function _updateRegimeOverrideUI(data) {
+  const override = data.override;
+  const botRegime = data.bot_regime || '—';
+
+  // 봇 판단 표시
+  const botEl = document.getElementById('regime-bot-judge');
+  if (botEl) botEl.textContent = botRegime;
+
+  // 오버라이드 배지
+  const badge = document.getElementById('regime-override-badge');
+  if (badge) badge.style.display = override ? 'inline' : 'none';
+
+  // 노트 텍스트
+  const note = document.getElementById('regime-override-note');
+  if (note) {
+    note.textContent = override
+      ? `수동 오버라이드 중: ${override} (봇 판단: ${botRegime})`
+      : `현재: 자동 (봇 판단 사용 중 → ${botRegime})`;
+    note.style.color = override ? 'var(--yellow)' : 'var(--text-muted)';
+  }
+
+  // 버튼 active 상태
+  document.querySelectorAll('.regime-sel-btn').forEach(btn => {
+    const r = btn.dataset.regime;
+    const isActive = override ? r === override : r === 'AUTO';
+    btn.classList.toggle('active', isActive);
+  });
+}
+
+async function setRegimeOverride(regime) {
+  try {
+    let res;
+    if (regime === 'AUTO') {
+      res = await fetch('/api/regime/override', { method: 'DELETE' });
+    } else {
+      res = await fetch('/api/regime/override', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ regime }),
+      });
+    }
+    if (!res.ok) {
+      const err = await res.json();
+      alert(`레짐 오버라이드 실패: ${err.detail || JSON.stringify(err)}`);
+      return;
+    }
+    await loadRegimeOverride();
+  } catch(e) {
+    alert(`오류: ${e.message}`);
+  }
+}
+
+// WebSocket에서 regime_override 이벤트 처리
+function _handleRegimeOverrideEvent(data) {
+  _currentRegimeOverride = data.override;
+  loadRegimeOverride();
+}
+
+// ============================================================
+// USER CONTROL — Exchange Mode
+// ============================================================
+
+async function loadExchangeMode() {
+  try {
+    const res = await fetch('/api/exchange-mode');
+    if (!res.ok) return;
+    const data = await res.json();
+    _applyExchangeModeUI(data.exchange_mode, data.hyperliquid_available);
+  } catch(e) {}
+}
+
+function _applyExchangeModeUI(mode, hlAvailable) {
+  // 라디오 버튼 선택
+  document.querySelectorAll('input[name="exchange_mode"]').forEach(radio => {
+    radio.checked = radio.value === mode;
+  });
+
+  // 선택된 옵션 하이라이트
+  document.querySelectorAll('.exchange-option').forEach(el => {
+    const val = el.querySelector('input')?.value;
+    el.classList.toggle('selected', val === mode);
+  });
+
+  // Hyperliquid 미사용 경고
+  const warn = document.getElementById('exchange-hl-warn');
+  if (warn) {
+    if (!hlAvailable && (mode === 'BOTH' || mode === 'HYPERLIQUID_ONLY')) {
+      warn.textContent = '⚠ Hyperliquid가 초기화되지 않았습니다. config에서 HYPERLIQUID_ENABLED=true 설정 필요.';
+      warn.style.display = 'block';
+    } else {
+      warn.style.display = 'none';
+    }
+  }
+
+  const note = document.getElementById('exchange-mode-note');
+  const labels = { BOTH: 'Binance + Hyperliquid', BINANCE_ONLY: 'Binance 전용', HYPERLIQUID_ONLY: 'Hyperliquid 전용' };
+  if (note) note.textContent = `현재: ${labels[mode] || mode}`;
+}
+
+async function setExchangeMode(mode) {
+  try {
+    const res = await fetch('/api/exchange-mode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode }),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      alert(`거래소 선택 실패: ${err.detail || JSON.stringify(err)}`);
+      await loadExchangeMode();  // 원래 상태로 복원
+      return;
+    }
+    await loadExchangeMode();
+  } catch(e) {
+    alert(`오류: ${e.message}`);
+  }
+}
+
+// ============================================================
+// USER CONTROL — Strategy Recommendations
+// ============================================================
+
+async function loadStrategyRecommendations() {
+  try {
+    const res = await fetch('/api/strategy-recommendations');
+    if (!res.ok) return;
+    const data = await res.json();
+    _renderStrategyRecommendations(data.pending || []);
+  } catch(e) {}
+}
+
+function _renderStrategyRecommendations(recs) {
+  const container = document.getElementById('strategy-recommendations-container');
+  if (!container) return;
+
+  if (!recs.length) {
+    container.innerHTML = `
+      <div style="color:var(--text-muted);font-size:13px;text-align:center;padding:20px">
+        현재 추천 사항이 없습니다. 거래 데이터가 쌓이면 자동으로 생성됩니다.
+      </div>`;
+    return;
+  }
+
+  const typeIcon = {
+    ACTIVATE: '▶',
+    PROMOTE:  '⬆',
+    SUSPEND:  '⏸',
+    ADJUST:   '⚙',
+    FOCUS:    '🎯',
+  };
+
+  container.innerHTML = recs.map(rec => {
+    const icon = typeIcon[rec.rec_type] || '●';
+    const data = rec.supporting_data || {};
+    const dataTags = Object.entries(data)
+      .filter(([k]) => !['current_regime'].includes(k))
+      .map(([k, v]) => {
+        if (typeof v === 'number') v = v.toFixed ? v.toFixed(3) : v;
+        return `<span class="rec-data-item">${k}: ${v}</span>`;
+      }).join('');
+
+    return `
+      <div class="rec-card" id="rec-${rec.id}">
+        <div class="rec-card-header">
+          <span class="rec-type-badge rec-type-${rec.rec_type}">${icon} ${rec.rec_type}</span>
+          <span class="rec-card-title">${escHtml(rec.title)}</span>
+        </div>
+        <div class="rec-card-reasoning">${escHtml(rec.reasoning)}</div>
+        ${dataTags ? `<div class="rec-card-data">${dataTags}</div>` : ''}
+        <div class="rec-card-actions">
+          <button class="rec-btn-approve" onclick="decideRecommendation('${rec.id}', true)">
+            ✓ 적용
+          </button>
+          <button class="rec-btn-reject" onclick="decideRecommendation('${rec.id}', false)">
+            ✗ 무시
+          </button>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+async function decideRecommendation(recId, approved) {
+  const reason = approved
+    ? '대시보드에서 승인'
+    : prompt('거절 이유 (선택사항)', '') ?? '대시보드에서 거절';
+
+  try {
+    const res = await fetch(`/api/strategy-recommendations/${recId}/decide`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        approved,
+        decided_by: 'dashboard_operator',
+        reason,
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      alert(`오류: ${err.detail}`);
+      return;
+    }
+    // 카드 제거 애니메이션
+    const card = document.getElementById(`rec-${recId}`);
+    if (card) {
+      card.style.opacity = '0';
+      card.style.transition = 'opacity .3s';
+      setTimeout(() => loadStrategyRecommendations(), 350);
+    }
+  } catch(e) {
+    alert(`오류: ${e.message}`);
+  }
+}
+
+async function refreshStrategyRecommendations() {
+  try {
+    await fetch('/api/strategy-recommendations/refresh', { method: 'POST' });
+    setTimeout(loadStrategyRecommendations, 500);
+  } catch(e) {}
+}
+
+function escHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+// ============================================================
+// 초기 로드 및 주기 갱신
+// ============================================================
+loadRegimeOverride();
+loadExchangeMode();
+loadStrategyRecommendations();
+setInterval(loadStrategyRecommendations, 5 * 60 * 1000);  // 5분마다 갱신

@@ -635,7 +635,6 @@ def create_app(
             "binance_ws":      binance_ws_ok,
             "openclaw":        openclaw_ok,
             "telegram":        telegram_ok,
-            "testnet":         config.binance_testnet,
             "last_ticker_ts":  last_ticker_ts,
             "ts":              int(now * 1000),
         })
@@ -671,11 +670,12 @@ def create_app(
         store = engine._store if engine is not None else None
         return JSONResponse({
             "system_mode":     store.get_system_mode() if store else (cfg.system_mode if cfg else "OBSERVE"),
-            "testnet":         cfg.binance_testnet if cfg else True,
             "tracked_symbols": cfg.tracked_symbols if cfg else [],
             "candle_intervals": cfg.candle_intervals if cfg else ["1h", "4h"],
             "ai_enabled":      getattr(cfg, "ai_enabled", True) if cfg else True,
             "kill_switch":     engine._kill_switch.is_active if (engine and engine._kill_switch) else False,
+            "exchange_mode":   store.get_exchange_mode() if store else "BOTH",
+            "regime_override": store.get_regime_override() if store else None,
         })
 
     @app.post("/api/settings")
@@ -737,6 +737,156 @@ def create_app(
                 logger.info("[Dashboard/Settings] tracked_symbols changed to %s", syms)
 
         return JSONResponse({"ok": True, "changed": changed})
+
+    # ------------------------------------------------------------------ #
+    # User Control — Regime Override
+    # ------------------------------------------------------------------ #
+
+    VALID_REGIMES = {
+        "BTC_BULLISH", "BTC_BEARISH", "BTC_SIDEWAYS",
+        "HIGH_VOLATILITY", "LOW_VOLATILITY", "ALT_ROTATION",
+        "EVENT_RISK", "UNKNOWN",
+    }
+
+    @app.get("/api/regime/override")
+    async def api_get_regime_override():
+        """현재 레짐 오버라이드 상태 반환."""
+        override = store.get_regime_override()
+        bot_regime = store.get_regime() or {}
+        return JSONResponse({
+            "override":    override,
+            "active":      override is not None,
+            "bot_regime":  bot_regime.get("bot_regime") or bot_regime.get("regime", "UNKNOWN"),
+            "ai_regime_note": (
+                regime_interpreter.get_last_interpretation_dict().get("regime")
+                if regime_interpreter and regime_interpreter.get_last_interpretation_dict()
+                else None
+            ),
+        })
+
+    @app.post("/api/regime/override")
+    async def api_set_regime_override(request: Request):
+        """사용자 레짐 수동 선택. body: {\"regime\": \"BTC_BULLISH\"} or {\"regime\": null}"""
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+        regime_val = body.get("regime")
+        if regime_val is None:
+            store.set_regime_override(None)
+            logger.info("[Dashboard] Regime override cleared — auto mode restored")
+            return JSONResponse({"ok": True, "override": None, "mode": "auto"})
+
+        regime_val = str(regime_val).upper()
+        if regime_val not in VALID_REGIMES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid regime. Must be one of {sorted(VALID_REGIMES)}",
+            )
+
+        store.set_regime_override(regime_val)
+        logger.info("[Dashboard] Regime override set to: %s", regime_val)
+        return JSONResponse({"ok": True, "override": regime_val, "mode": "manual"})
+
+    @app.delete("/api/regime/override")
+    async def api_clear_regime_override():
+        """레짐 오버라이드 해제 (자동 복원)."""
+        store.set_regime_override(None)
+        return JSONResponse({"ok": True, "override": None, "mode": "auto"})
+
+    # ------------------------------------------------------------------ #
+    # User Control — Exchange Mode
+    # ------------------------------------------------------------------ #
+
+    @app.get("/api/exchange-mode")
+    async def api_get_exchange_mode():
+        """현재 거래소 선택 모드 반환."""
+        return JSONResponse({
+            "exchange_mode": store.get_exchange_mode(),
+            "hyperliquid_available": (
+                engine._hl_executor is not None if engine else False
+            ),
+        })
+
+    @app.post("/api/exchange-mode")
+    async def api_set_exchange_mode(request: Request):
+        """거래소 선택 변경. body: {\"mode\": \"BOTH\" | \"BINANCE_ONLY\" | \"HYPERLIQUID_ONLY\"}"""
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+        mode = str(body.get("mode", "")).upper()
+        valid = {"BOTH", "BINANCE_ONLY", "HYPERLIQUID_ONLY"}
+        if mode not in valid:
+            raise HTTPException(status_code=400, detail=f"mode must be one of {valid}")
+
+        # Hyperliquid 미설치 시 HL 선택 방지
+        if mode in ("BOTH", "HYPERLIQUID_ONLY") and engine and engine._hl_executor is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Hyperliquid executor is not initialized. Enable HYPERLIQUID_ENABLED in config.",
+            )
+
+        store.set_exchange_mode(mode)
+        logger.info("[Dashboard] Exchange mode changed to: %s", mode)
+        return JSONResponse({"ok": True, "exchange_mode": mode})
+
+    # ------------------------------------------------------------------ #
+    # User Control — Strategy Recommendations
+    # ------------------------------------------------------------------ #
+
+    @app.get("/api/strategy-recommendations")
+    async def api_get_strategy_recommendations():
+        """봇이 생성한 전략 추천 목록 반환."""
+        recommender = getattr(engine, "_strategy_recommender", None) if engine else None
+        if recommender is None:
+            return JSONResponse({"pending": [], "history": []})
+        return JSONResponse({
+            "pending": recommender.get_pending(),
+            "history": recommender.get_history(limit=20),
+        })
+
+    @app.post("/api/strategy-recommendations/refresh")
+    async def api_refresh_strategy_recommendations():
+        """즉시 전략 추천 재분석 트리거."""
+        recommender = getattr(engine, "_strategy_recommender", None) if engine else None
+        if recommender is None:
+            raise HTTPException(status_code=503, detail="StrategyRecommender not initialized")
+        regime = store.get_regime() or {"regime": "UNKNOWN"}
+        new_recs = recommender.generate_recommendations(regime)
+        return JSONResponse({"ok": True, "new_recommendations": len(new_recs)})
+
+    @app.post("/api/strategy-recommendations/{rec_id}/decide")
+    async def api_decide_strategy_recommendation(rec_id: str, request: Request):
+        """
+        전략 추천 승인 또는 거절.
+        body: {\"approved\": true, \"decided_by\": \"operator\", \"reason\": \"...\"}
+        """
+        recommender = getattr(engine, "_strategy_recommender", None) if engine else None
+        if recommender is None:
+            raise HTTPException(status_code=503, detail="StrategyRecommender not initialized")
+
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+        approved   = bool(body.get("approved", False))
+        decided_by = str(body.get("decided_by", "dashboard_operator"))
+        reason     = str(body.get("reason", ""))
+
+        result = recommender.apply_recommendation(
+            rec_id=rec_id,
+            approved=approved,
+            decided_by=decided_by,
+            reason=reason,
+        )
+        if not result.get("ok"):
+            raise HTTPException(status_code=404, detail=result.get("error", "Unknown error"))
+
+        return JSONResponse(result)
 
     # ------------------------------------------------------------------ #
     # Strategy params (runtime editable)

@@ -35,6 +35,14 @@ from bot.strategies.volatility_expansion_breakout import VolatilityExpansionBrea
 from bot.strategies.early_trend_capture import EarlyTrendCaptureStrategy
 # 이미지 패턴 전략 (사용자 정의)
 from bot.strategies.image_pattern_strategy import ImagePatternStrategy
+# Phase 5 — 추가 전략 3개 (legacy PAUSED)
+from bot.strategies.ema_cross import EmaCrossStrategy
+from bot.strategies.rsi_exhaustion import RsiExhaustionStrategy
+from bot.strategies.range_breakout import RangeBreakoutStrategy
+# 방향성 강화 신규 전략 3개
+from bot.strategies.bear_trend import BearTrendStrategy
+from bot.strategies.range_trader import RangeTraderStrategy
+from bot.strategies.volatility_momentum import VolatilityMomentumStrategy
 
 if TYPE_CHECKING:
     from bot.data.store import DataStore
@@ -42,6 +50,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 ALLOWED_LIFECYCLE = {"PAPER", "SHADOW", "ACTIVE"}
+
+# 새 전략(overreaction_reversal 등)과 기능이 중복되는 레거시 전략
+# initialize() 시 DB 상태와 무관하게 PAUSED로 고정
+LEGACY_STRATEGIES = {"ema_cross", "rsi_exhaustion", "range_breakout"}
 
 
 class StrategyManager:
@@ -69,13 +81,21 @@ class StrategyManager:
         self._scorer      = ScoringEngine()
         self._opp_queue   = OpportunityQueue(top_n_live=2)
 
-        # v1.3 전략 3개 + 이미지 패턴 전략 (우선순위 순)
+        # v1.3 전략 3개 + 이미지 패턴 전략 + Phase 5 추가 전략 3개
         self._image_pattern_strategy = ImagePatternStrategy()
         self._strategies: List[StrategyBase] = [
             OverreactionReversalStrategy(),
             VolatilityExpansionBreakoutStrategy(),
             EarlyTrendCaptureStrategy(),
             self._image_pattern_strategy,
+            # Phase 5 — legacy (PAUSED 자동 처리됨)
+            EmaCrossStrategy(),
+            RsiExhaustionStrategy(),
+            RangeBreakoutStrategy(),
+            # 방향성 강화 신규 전략
+            BearTrendStrategy(),
+            RangeTraderStrategy(),
+            VolatilityMomentumStrategy(),
         ]
 
         self._state: Dict[str, dict] = {}
@@ -122,6 +142,15 @@ class StrategyManager:
                     "[StrategyManager] Loaded '%s' (mode=%s)",
                     strategy.name, existing.get("mode", "PAPER"),
                 )
+
+            # 레거시 전략은 DB 값과 무관하게 PAUSED 강제
+            if strategy.name in LEGACY_STRATEGIES:
+                self._state[strategy.name]["mode"] = "PAUSED"
+                self._store.upsert_strategy_state({
+                    "name": strategy.name,
+                    "mode": "PAUSED",
+                })
+                logger.info("[StrategyManager] '%s' → PAUSED (legacy/redundant)", strategy.name)
 
     # ---------------------------------------------------------------------- #
     # Main execution cycle

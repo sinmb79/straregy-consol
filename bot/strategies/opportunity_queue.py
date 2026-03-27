@@ -53,7 +53,44 @@ class OpportunityQueue:
     # ---------------------------------------------------------------------- #
 
     def add(self, opp: Opportunity) -> None:
-        """Opportunity를 큐에 추가하고 순위를 재산정한다."""
+        """
+        Opportunity를 큐에 추가하고 순위를 재산정한다.
+
+        Same-family dedup (2단계-A):
+          같은 심볼 + 방향 + 카테고리 + 1H 바 안에서는 최고점 1개만 PENDING 유지.
+          열등한 기회는 즉시 IGNORED로 전환.
+        """
+        bar_1h = opp.ts // (3_600_000)   # 1시간 단위 bucket
+
+        for existing in self._queue:
+            if (
+                existing.execution_status == "PENDING"
+                and existing.symbol   == opp.symbol
+                and existing.side     == opp.side
+                and existing.category == opp.category
+                and existing.ts // (3_600_000) == bar_1h
+            ):
+                if opp.score_total > existing.score_total:
+                    # 신규가 더 좋음 — 기존을 IGNORED로 대체
+                    existing.execution_status = "IGNORED"
+                    logger.info(
+                        "[OppQueue] same-family dedup: replaced %s %s %s "
+                        "(score %d → %d)",
+                        opp.symbol, opp.side, opp.category,
+                        existing.score_total, opp.score_total,
+                    )
+                else:
+                    # 기존이 더 좋음 — 신규를 IGNORED 처리 후 반환
+                    opp.execution_status = "IGNORED"
+                    logger.debug(
+                        "[OppQueue] same-family dedup: dropped %s %s %s "
+                        "score=%d (kept existing score=%d)",
+                        opp.symbol, opp.side, opp.category,
+                        opp.score_total, existing.score_total,
+                    )
+                    self._queue.appendleft(opp)
+                    return
+
         self._queue.appendleft(opp)
         self._expire_old()
         self._rank_all()

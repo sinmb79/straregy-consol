@@ -29,12 +29,26 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Thresholds
+# Thresholds — 판단 기준
 MIN_TRADES = 10          # 판단을 위한 최소 거래 수
 WARN_PF_THRESHOLD = 1.2  # recent_10_pf < 1.2 → WARN
 PAUSE_PF_THRESHOLD = 1.0  # recent_10_pf < 1.0 → PAUSE 후보
 PAUSE_MDD_THRESHOLD = -15.0  # recent_mdd < -15% → 추가 경고
 WARN_WIN_RATE = 0.35     # win_rate < 35% → 경고
+
+# ── LIVE 승격 기준 (Master Plan PART 11) ────────────────────────────────────
+# PAPER → SHADOW
+PROMOTE_PAPER_MIN_SIGNALS   = 30    # 최소 신호(거래) 수
+PROMOTE_PAPER_MIN_PF        = 1.2   # Profit Factor 최소값
+PROMOTE_PAPER_MIN_EXPECTANCY = 0.0  # 기댓값 > 0 (양수 기대수익)
+PROMOTE_PAPER_MAX_MDD       = -10.0 # MDD -10% 이내
+
+# SHADOW → LIVE
+PROMOTE_SHADOW_MIN_SIGNALS   = 50
+PROMOTE_SHADOW_MIN_PF        = 1.5
+PROMOTE_SHADOW_MIN_EXPECTANCY = 0.0
+PROMOTE_SHADOW_MAX_MDD       = -8.0
+PROMOTE_SHADOW_MIN_WIN_RATE  = 0.40  # 승률 40% 이상
 
 
 class StrategyHealthEngine:
@@ -203,41 +217,86 @@ class StrategyHealthEngine:
             )
         elif health_status in ("OK", "WARN"):
             # live_eligibility 업데이트
-            eligible = 1 if health_status == "OK" and (health.get("recent_10_pf") or 0) >= 1.2 else 0
+            pf10 = health.get("recent_10_pf") or 0.0
+            eligible = 1 if health_status == "OK" and pf10 >= PROMOTE_PAPER_MIN_PF else 0
             self._store.upsert_strategy_state({
                 "name": name,
                 "live_eligibility": eligible,
             })
-            # PAPER 전략이 LIVE 조건 충족 시 PROMOTE 추천 자동 생성
-            if (
-                eligible == 1
-                and current_mode == "PAPER"
-                and self._approval_manager is not None
-            ):
-                # 이미 PENDING 추천이 있으면 중복 생성 방지
+
+            if self._approval_manager is not None:
                 pending = self._approval_manager.get_pending_recommendations()
-                already = any(
-                    r.get("type") == "PROMOTE" and r.get("strategy") == name
-                    for r in pending
-                )
-                if not already:
-                    self._approval_manager.create_recommendation(
-                        type_="PROMOTE",
-                        strategy=name,
-                        current_mode="PAPER",
-                        proposed_mode="SHADOW",
-                        supporting_data={
-                            "recent_10_pf":  health.get("recent_10_pf"),
-                            "recent_20_pf":  health.get("recent_20_pf"),
-                            "recent_mdd":    health.get("recent_mdd"),
-                            "win_rate_10":   health.get("win_rate_10"),
-                        },
-                        expected_risk={"shadow_mode": True, "live_money_risk": False},
-                        rollback_condition="recent_10_pf < 1.0 이면 즉시 PAUSED",
+
+                # ── PAPER → SHADOW 승격 기준 ─────────────────────────────── #
+                if current_mode == "PAPER" and self._check_paper_to_shadow(health):
+                    already = any(
+                        r.get("type") == "PROMOTE"
+                        and r.get("strategy") == name
+                        and r.get("proposed_mode") == "SHADOW"
+                        for r in pending
                     )
-                    logger.info(
-                        "[HealthEngine] PROMOTE 추천 생성: '%s' PAPER → SHADOW", name
+                    if not already:
+                        self._approval_manager.create_recommendation(
+                            type_="PROMOTE",
+                            strategy=name,
+                            current_mode="PAPER",
+                            proposed_mode="SHADOW",
+                            supporting_data={
+                                "trade_count":   health.get("trade_count"),
+                                "recent_10_pf":  health.get("recent_10_pf"),
+                                "recent_20_pf":  health.get("recent_20_pf"),
+                                "recent_mdd":    health.get("recent_mdd"),
+                                "win_rate_10":   health.get("win_rate_10"),
+                                "expectancy":    health.get("recent_expectancy"),
+                            },
+                            expected_risk={"shadow_mode": True, "live_money_risk": False},
+                            rollback_condition=(
+                                f"recent_10_pf < {PAUSE_PF_THRESHOLD} 이면 즉시 PAUSED"
+                            ),
+                        )
+                        logger.info(
+                            "[HealthEngine] PROMOTE 추천 생성: '%s' PAPER → SHADOW "
+                            "(trades=%d, pf10=%.2f, mdd=%.1f%%)",
+                            name, health.get("trade_count", 0),
+                            health.get("recent_10_pf") or 0,
+                            health.get("recent_mdd") or 0,
+                        )
+
+                # ── SHADOW → LIVE 승격 기준 ──────────────────────────────── #
+                elif current_mode == "SHADOW" and self._check_shadow_to_live(health):
+                    already = any(
+                        r.get("type") == "PROMOTE"
+                        and r.get("strategy") == name
+                        and r.get("proposed_mode") == "LIVE"
+                        for r in pending
                     )
+                    if not already:
+                        self._approval_manager.create_recommendation(
+                            type_="PROMOTE",
+                            strategy=name,
+                            current_mode="SHADOW",
+                            proposed_mode="LIVE",
+                            supporting_data={
+                                "trade_count":   health.get("trade_count"),
+                                "recent_10_pf":  health.get("recent_10_pf"),
+                                "recent_20_pf":  health.get("recent_20_pf"),
+                                "recent_mdd":    health.get("recent_mdd"),
+                                "win_rate_10":   health.get("win_rate_10"),
+                                "expectancy":    health.get("recent_expectancy"),
+                            },
+                            expected_risk={"live_money_risk": True},
+                            rollback_condition=(
+                                f"recent_10_pf < {PAUSE_PF_THRESHOLD} 이면 즉시 PAUSED"
+                            ),
+                        )
+                        logger.info(
+                            "[HealthEngine] PROMOTE 추천 생성: '%s' SHADOW → LIVE "
+                            "(trades=%d, pf10=%.2f, win_rate=%.0f%%, mdd=%.1f%%)",
+                            name, health.get("trade_count", 0),
+                            health.get("recent_10_pf") or 0,
+                            (health.get("win_rate_10") or 0) * 100,
+                            health.get("recent_mdd") or 0,
+                        )
 
         level = {"OK": "info", "WARN": "warning", "PAUSE": "warning", "UNKNOWN": "debug"}.get(health_status, "info")
         getattr(logger, level)(
@@ -309,6 +368,32 @@ class StrategyHealthEngine:
     # ---------------------------------------------------------------------- #
     # Helpers
     # ---------------------------------------------------------------------- #
+
+    def _check_paper_to_shadow(self, health: dict) -> bool:
+        """PAPER → SHADOW 승격 조건을 모두 충족하는지 확인."""
+        if (health.get("trade_count") or 0) < PROMOTE_PAPER_MIN_SIGNALS:
+            return False
+        if (health.get("recent_10_pf") or 0.0) < PROMOTE_PAPER_MIN_PF:
+            return False
+        if (health.get("recent_expectancy") or 0.0) <= PROMOTE_PAPER_MIN_EXPECTANCY:
+            return False
+        if (health.get("recent_mdd") or 0.0) < PROMOTE_PAPER_MAX_MDD:
+            return False
+        return True
+
+    def _check_shadow_to_live(self, health: dict) -> bool:
+        """SHADOW → LIVE 승격 조건을 모두 충족하는지 확인."""
+        if (health.get("trade_count") or 0) < PROMOTE_SHADOW_MIN_SIGNALS:
+            return False
+        if (health.get("recent_10_pf") or 0.0) < PROMOTE_SHADOW_MIN_PF:
+            return False
+        if (health.get("recent_expectancy") or 0.0) <= PROMOTE_SHADOW_MIN_EXPECTANCY:
+            return False
+        if (health.get("recent_mdd") or 0.0) < PROMOTE_SHADOW_MAX_MDD:
+            return False
+        if (health.get("win_rate_10") or 0.0) < PROMOTE_SHADOW_MIN_WIN_RATE:
+            return False
+        return True
 
     def _get_recent_trades(self, strategy: str, limit: int = 30) -> List[dict]:
         """최근 closed paper positions 조회."""

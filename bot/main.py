@@ -50,11 +50,21 @@ from bot.regime.fast_layer import FastLayer
 from bot.strategies.manager import StrategyManager
 from bot.strategies.approval_manager import ApprovalManager
 from bot.strategies.params_store import StrategyParamsStore
+from bot.strategies.strategy_recommender import StrategyRecommender
 from bot.execution.kill_switch import KillSwitch
 from bot.execution.state_machine import OrderStateMachine
 from bot.execution.risk_manager import RiskManager
 from bot.execution.executor import Executor
 from bot.execution.reconciler import Reconciler
+# Phase 6: Hyperliquid DEX (optional)
+try:
+    from bot.data.hyperliquid_collector import HyperliquidCollector
+    from bot.execution.hyperliquid_executor import HyperliquidExecutor
+    _PHASE6_AVAILABLE = True
+except ImportError:
+    HyperliquidCollector = None   # type: ignore[assignment,misc]
+    HyperliquidExecutor = None    # type: ignore[assignment,misc]
+    _PHASE6_AVAILABLE = False
 # Phase 4: AI analysis components (NOT in execution path)
 # Conditional imports — Phase 4 modules may not exist yet in Phase 3 deployments
 try:
@@ -113,11 +123,18 @@ class Engine:
         self._executor: Optional[Executor] = None
         self._reconciler: Optional[Reconciler] = None
 
+        # Phase 6: Hyperliquid DEX components
+        self._hl_collector: Optional[HyperliquidCollector] = None
+        self._hl_executor: Optional[HyperliquidExecutor] = None
+
         # Phase 4 AI components (NEVER in execution path)
         self._claude: Optional[ClaudeClient] = None
         self._regime_interpreter: Optional[RegimeInterpreter] = None
         self._daily_reviewer: Optional[DailyReviewer] = None
         self._weekly_reviewer: Optional[WeeklyReviewer] = None
+
+        # Strategy Recommender (사용자에게 전략 추천 제공)
+        self._strategy_recommender: Optional[StrategyRecommender] = None
 
         # Cloudflare Tunnel
         self._tunnel = None
@@ -218,6 +235,9 @@ class Engine:
         # Health Engine에 ApprovalManager 주입
         if self._strategy_manager.health_engine is not None:
             self._strategy_manager.health_engine.set_approval_manager(self._approval_manager)
+
+        # Strategy Recommender 초기화
+        self._strategy_recommender = StrategyRecommender(self._store, self._strategy_manager)
         logger.info(
             "StrategyManager initialized with %d strategies",
             len(self._strategy_manager.get_strategy_list()),
@@ -251,7 +271,7 @@ class Engine:
             )
             await self._executor.start()
             self._kill_switch.set_executor(self._executor)
-            logger.info("Executor initialized. Testnet=%s", self._config.binance_testnet)
+            logger.info("Executor initialized. Network=MAINNET")
 
             # 11. Phase 3: Reconciler
             self._reconciler = Reconciler(
@@ -262,6 +282,32 @@ class Engine:
             )
             self._reconciler.start()
             logger.info("Reconciler started (interval=5min).")
+
+            # Phase 6: Hyperliquid DEX (HYPERLIQUID_ENABLED=true 시)
+            if _PHASE6_AVAILABLE and self._config.hyperliquid_enabled:
+                try:
+                    self._hl_collector = HyperliquidCollector(self._config, self._store)
+                    await self._hl_collector.start()
+
+                    self._hl_executor = HyperliquidExecutor(
+                        config=self._config,
+                        store=self._store,
+                        state_machine=self._state_machine,
+                        kill_switch=self._kill_switch,
+                    )
+                    await self._hl_executor.start()
+                    logger.info("Phase 6: Hyperliquid executor 초기화 완료.")
+                except Exception as exc:
+                    logger.error(
+                        "Phase 6: Hyperliquid 초기화 실패 — 비활성화: %s", exc
+                    )
+                    self._hl_collector = None
+                    self._hl_executor = None
+            else:
+                if not _PHASE6_AVAILABLE:
+                    logger.info("Phase 6: hyperliquid-python-sdk 미설치 — 건너뜀.")
+                elif not self._config.hyperliquid_enabled:
+                    logger.info("Phase 6: HYPERLIQUID_ENABLED=false — 건너뜀.")
         else:
             logger.info("Offline validation dataset mode enabled — executor/reconciler remain disabled.")
 
@@ -461,6 +507,13 @@ class Engine:
             except Exception as exc:
                 logger.error("Strategy manager run_all error: %s", exc)
 
+        # 전략 추천 주기 갱신 (30분 인터벌)
+        if self._strategy_recommender is not None:
+            try:
+                self._strategy_recommender.maybe_generate(result)
+            except Exception as exc:
+                logger.debug("[StrategyRecommender] Error: %s", exc)
+
         return last_regime
 
     async def _execute_live_signals(self, signals, regime: dict) -> None:
@@ -500,18 +553,43 @@ class Engine:
                     signal.action, signal.symbol, risk_result.position_size,
                 )
 
-                # Submit order
-                order_result = await self._executor.submit_order(
-                    signal=signal,
-                    qty=risk_result.position_size,
-                )
+                # 사용자 거래소 선택 적용
+                exchange_mode = self._store.get_exchange_mode()  # BOTH | BINANCE_ONLY | HYPERLIQUID_ONLY
 
-                if "error" not in order_result:
-                    logger.info(
-                        "[Engine] Order submitted: %s status=%s",
-                        order_result.get("internal_order_id"),
-                        order_result.get("status"),
+                # Submit order — Binance
+                if exchange_mode in ("BOTH", "BINANCE_ONLY"):
+                    order_result = await self._executor.submit_order(
+                        signal=signal,
+                        qty=risk_result.position_size,
                     )
+                    if "error" not in order_result:
+                        logger.info(
+                            "[Engine] Binance order submitted: %s status=%s",
+                            order_result.get("internal_order_id"),
+                            order_result.get("status"),
+                        )
+
+                # Phase 6: Hyperliquid 병렬 실행 (사용자 선택 반영)
+                if exchange_mode in ("BOTH", "HYPERLIQUID_ONLY") and self._hl_executor is not None:
+                    try:
+                        hl_result = await self._hl_executor.submit_order(
+                            signal=signal,
+                            qty=risk_result.position_size,
+                        )
+                        if "error" not in hl_result:
+                            logger.info(
+                                "[Engine] Hyperliquid order submitted: %s",
+                                hl_result.get("internal_order_id"),
+                            )
+                        else:
+                            logger.warning(
+                                "[Engine] Hyperliquid order error: %s",
+                                hl_result.get("error"),
+                            )
+                    except Exception as hl_exc:
+                        logger.error(
+                            "[Engine] Hyperliquid execution error: %s", hl_exc
+                        )
 
             except Exception as exc:
                 logger.error(
@@ -554,7 +632,6 @@ class Engine:
             """인라인 키보드 컨트롤박스 전송."""
             mode = self._store.get_system_mode() if self._store else "OBSERVE"
             ks   = self._kill_switch.is_active if self._kill_switch else False
-            net  = "테스트넷" if self._config.binance_testnet else "실전"
             keyboard = {
                 "inline_keyboard": [
                     [
@@ -590,7 +667,7 @@ class Engine:
             try:
                 await client.post(f"{base}/sendMessage", json={
                     "chat_id":      chat_id_target,
-                    "text":         f"*🎛 22B Control Panel*\n현재 모드: `{mode}` | 네트워크: `{net}`\nKill Switch: `{'🔴 활성' if ks else '🟢 해제'}`",
+                    "text":         f"*🎛 22B Control Panel*\n현재 모드: `{mode}` | 네트워크: `실전`\nKill Switch: `{'🔴 활성' if ks else '🟢 해제'}`",
                     "parse_mode":   "Markdown",
                     "reply_markup": keyboard,
                 })
@@ -712,9 +789,8 @@ class Engine:
                                 wpnl     = self._store.get_weekly_pnl()
                                 sign_d   = "+" if dpnl >= 0 else ""
                                 sign_w   = "+" if wpnl >= 0 else ""
-                                net_str  = "테스트넷" if self._config.binance_testnet else "실전"
                                 await self._telegram.send_message(
-                                    f"*💰 잔고 현황* ({net_str})\n\n"
+                                    f"*💰 잔고 현황* (실전)\n\n"
                                     f"잔고: `{balance:.2f} USDT`\n"
                                     f"오늘 손익: `{sign_d}{dpnl:.2f} USDT ({sign_d}{dp:.2f}%)`\n"
                                     f"이번 주 손익: `{sign_w}{wpnl:.2f} USDT`"
@@ -966,9 +1042,8 @@ class Engine:
                             wpnl     = self._store.get_weekly_pnl()
                             sign_d   = "+" if dpnl >= 0 else ""
                             sign_w   = "+" if wpnl >= 0 else ""
-                            network  = "테스트넷" if self._config.binance_testnet else "실전"
                             await self._telegram.send_message(
-                                f"*💰 잔고 현황* ({network})\n\n"
+                                f"*💰 잔고 현황* (실전)\n\n"
                                 f"잔고: `{balance:.2f} USDT`\n"
                                 f"오늘 손익: `{sign_d}{dpnl:.2f} USDT ({sign_d}{dp:.2f}%)`\n"
                                 f"이번 주 손익: `{sign_w}{wpnl:.2f} USDT`"
@@ -1346,6 +1421,10 @@ class Engine:
             await self._tunnel.stop()
         if self._reconciler:
             self._reconciler.stop()
+        if self._hl_executor:
+            await self._hl_executor.stop()
+        if self._hl_collector:
+            await self._hl_collector.stop()
         if self._executor:
             await self._executor.stop()
         if self._collector:

@@ -61,6 +61,10 @@ class OverreactionReversalStrategy(StrategyBase):
     TP_PCT:              float = 0.025  # 2.5%
     SL_PCT:              float = 0.012  # 1.2%
     INTERVAL:            str   = "1h"
+    # 펀딩 극단값 기준 (OpportunityNormalizer와 동일)
+    FUNDING_EXTREME_LONG:  float =  0.0005   # +0.05% 이상 → 롱 과열
+    FUNDING_EXTREME_SHORT: float = -0.0005   # -0.05% 이하 → 숏 과열
+    FUNDING_EXTREME_BONUS: float =  0.10     # 극단 펀딩 시 confidence +10%
 
     def compute(self, store: "DataStore", regime: dict) -> List[Signal]:
         from bot.config import get_config
@@ -128,6 +132,11 @@ class OverreactionReversalStrategy(StrategyBase):
             and funding <= 0.0001                              # 숏 과열 or 중립
         ):
             confidence = self._clamp(1.0 - rsi_cur / 100.0 + abs(max_drop) * 2, 0.5, 1.0)
+            # 펀딩 EXTREME_SHORT → 숏 청산 압력 ↑ → 반등 가능성 ↑ → confidence 보정
+            funding_note = ""
+            if funding <= self.FUNDING_EXTREME_SHORT:
+                confidence = self._clamp(confidence + self.FUNDING_EXTREME_BONUS, 0.5, 1.0)
+                funding_note = " [EXTREME_SHORT_FUNDING]"
             tp = round(price_cur * (1 + tp_pct), 8)
             sl = round(price_cur * (1 - sl_pct), 8)
             return Signal(
@@ -137,7 +146,7 @@ class OverreactionReversalStrategy(StrategyBase):
                 tp=tp, sl=sl,
                 reason=(
                     f"Overreaction reversal BUY: RSI={rsi_cur:.1f}(회복), "
-                    f"최대낙폭={max_drop*100:.1f}%, funding={funding:.5f}"
+                    f"최대낙폭={max_drop*100:.1f}%, funding={funding:.5f}{funding_note}"
                 ),
             )
 
@@ -150,6 +159,11 @@ class OverreactionReversalStrategy(StrategyBase):
             and funding >= -0.0001                             # 롱 과열 or 중립
         ):
             confidence = self._clamp(rsi_cur / 100.0 + max_gain * 2, 0.5, 1.0)
+            # 펀딩 EXTREME_LONG → 롱 청산 압력 ↑ → 하락 가능성 ↑ → confidence 보정
+            funding_note = ""
+            if funding >= self.FUNDING_EXTREME_LONG:
+                confidence = self._clamp(confidence + self.FUNDING_EXTREME_BONUS, 0.5, 1.0)
+                funding_note = " [EXTREME_LONG_FUNDING]"
             tp = round(price_cur * (1 - tp_pct), 8)
             sl = round(price_cur * (1 + sl_pct), 8)
             return Signal(
@@ -159,7 +173,7 @@ class OverreactionReversalStrategy(StrategyBase):
                 tp=tp, sl=sl,
                 reason=(
                     f"Overreaction reversal SELL: RSI={rsi_cur:.1f}(하락), "
-                    f"최대상승={max_gain*100:.1f}%, funding={funding:.5f}"
+                    f"최대상승={max_gain*100:.1f}%, funding={funding:.5f}{funding_note}"
                 ),
             )
 

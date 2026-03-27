@@ -225,9 +225,9 @@
       </div>
       <!-- Network -->
       <div class="health-item">
-        <div class="health-icon" style="color:var(--text-muted)">&#x25A0;</div>
+        <div class="health-icon" style="color:var(--green)">&#x25A0;</div>
         <div class="health-label">Network</div>
-        <div class="health-value" id="hval-net">—</div>
+        <div class="health-value" style="color:var(--green)">MAINNET</div>
       </div>
     </div>
   </div>
@@ -260,6 +260,12 @@
           <div class="regime-name regime-UNKNOWN" id="regime-name">UNKNOWN</div>
         {% endif %}
         <div class="regime-updated" id="regime-ts">—</div>
+        <!-- 봇 판단 / 오버라이드 표시 -->
+        <div style="margin-top:8px;font-size:11px;color:var(--text-muted)">
+          봇 판단: <span id="regime-bot-judge" style="color:var(--text-secondary)">—</span>
+          &nbsp;|&nbsp;
+          <span id="regime-override-badge" style="display:none;color:var(--yellow);font-weight:600">수동 오버라이드 중</span>
+        </div>
         <div class="regime-allowed mt-8" id="regime-allowed">
           {% if snapshot.regime and snapshot.regime.allowed_strategies %}
             {% for s in snapshot.regime.allowed_strategies %}
@@ -268,6 +274,24 @@
           {% else %}
             <span style="color:var(--red)">NONE</span>
           {% endif %}
+        </div>
+
+        <!-- 레짐 수동 선택 컨트롤 -->
+        <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
+          <div style="font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">
+            레짐 수동 선택 (선택 안 하면 봇 자동 판단)
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px" id="regime-selector-btns">
+            <button class="regime-sel-btn" data-regime="AUTO" onclick="setRegimeOverride('AUTO')" title="자동 (봇 판단)">AUTO</button>
+            <button class="regime-sel-btn" data-regime="BTC_BULLISH" onclick="setRegimeOverride('BTC_BULLISH')">BULLISH</button>
+            <button class="regime-sel-btn" data-regime="BTC_BEARISH" onclick="setRegimeOverride('BTC_BEARISH')">BEARISH</button>
+            <button class="regime-sel-btn" data-regime="BTC_SIDEWAYS" onclick="setRegimeOverride('BTC_SIDEWAYS')">SIDEWAYS</button>
+            <button class="regime-sel-btn" data-regime="HIGH_VOLATILITY" onclick="setRegimeOverride('HIGH_VOLATILITY')">HIGH VOL</button>
+            <button class="regime-sel-btn" data-regime="LOW_VOLATILITY" onclick="setRegimeOverride('LOW_VOLATILITY')">LOW VOL</button>
+            <button class="regime-sel-btn" data-regime="ALT_ROTATION" onclick="setRegimeOverride('ALT_ROTATION')">ALT ROT</button>
+            <button class="regime-sel-btn" data-regime="EVENT_RISK" onclick="setRegimeOverride('EVENT_RISK')">EVENT RISK</button>
+          </div>
+          <div style="font-size:10px;color:var(--text-muted)" id="regime-override-note">현재: 자동 (봇 판단 사용 중)</div>
         </div>
       </div>
 
@@ -295,6 +319,72 @@
         {% endif %}
       </div>
     </div>
+  </div>
+
+  <!-- -------------------------------------------------------- -->
+  <!-- USER CONTROL PANEL: 거래소 선택 + 전략 추천             -->
+  <!-- -------------------------------------------------------- -->
+  <div style="display:grid;grid-template-columns:1fr 2fr;gap:16px;margin-bottom:20px">
+
+    <!-- 거래소 선택 -->
+    <div class="panel" style="margin-bottom:0">
+      <div class="panel-header">
+        <span class="panel-title">
+          <span class="panel-title-icon">🏦</span>
+          거래소 선택
+        </span>
+      </div>
+      <div style="padding:16px">
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:10px">
+          매매를 실행할 거래소를 선택하세요. 미선택 시 설정에 따라 자동 실행됩니다.
+        </div>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <label class="exchange-option" id="exopt-BOTH">
+            <input type="radio" name="exchange_mode" value="BOTH" onchange="setExchangeMode('BOTH')" />
+            <div class="exchange-option-body">
+              <div style="font-weight:600">Binance + Hyperliquid</div>
+              <div style="font-size:11px;color:var(--text-muted)">두 거래소 모두 실행 (분산)</div>
+            </div>
+          </label>
+          <label class="exchange-option" id="exopt-BINANCE_ONLY">
+            <input type="radio" name="exchange_mode" value="BINANCE_ONLY" onchange="setExchangeMode('BINANCE_ONLY')" />
+            <div class="exchange-option-body">
+              <div style="font-weight:600">Binance Only</div>
+              <div style="font-size:11px;color:var(--text-muted)">바이낸스 선물만 실행</div>
+            </div>
+          </label>
+          <label class="exchange-option" id="exopt-HYPERLIQUID_ONLY">
+            <input type="radio" name="exchange_mode" value="HYPERLIQUID_ONLY" onchange="setExchangeMode('HYPERLIQUID_ONLY')" />
+            <div class="exchange-option-body">
+              <div style="font-weight:600">Hyperliquid Only</div>
+              <div style="font-size:11px;color:var(--text-muted)">Hyperliquid DEX만 실행</div>
+            </div>
+          </label>
+        </div>
+        <div style="font-size:10px;color:var(--text-muted);margin-top:10px" id="exchange-mode-note">현재: —</div>
+        <div style="font-size:10px;color:var(--yellow);margin-top:4px" id="exchange-hl-warn" style="display:none"></div>
+      </div>
+    </div>
+
+    <!-- 전략 추천 코너 -->
+    <div class="panel" style="margin-bottom:0">
+      <div class="panel-header">
+        <span class="panel-title">
+          <span class="panel-title-icon">🎯</span>
+          전략 추천 코너 (봇 + AI 분석)
+        </span>
+        <button onclick="refreshStrategyRecommendations()" style="
+          background:var(--bg-card);border:1px solid var(--border);
+          color:var(--text-secondary);padding:4px 10px;border-radius:var(--radius-sm);
+          cursor:pointer;font-size:11px">↻ 재분석</button>
+      </div>
+      <div id="strategy-recommendations-container" style="padding:12px">
+        <div style="color:var(--text-muted);font-size:13px;text-align:center;padding:20px">
+          전략 추천을 불러오는 중…
+        </div>
+      </div>
+    </div>
+
   </div>
 
   <!-- -------------------------------------------------------- -->

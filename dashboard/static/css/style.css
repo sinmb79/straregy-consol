@@ -2035,3 +2035,155 @@ details[open] .history-summary::before {
   font-size: 11px;
   color: var(--text-secondary);
 }
+
+/* ============================================================
+   User Control — Regime Selector Buttons
+   ============================================================ */
+.regime-sel-btn {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  transition: background .15s, border-color .15s, color .15s;
+}
+.regime-sel-btn:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--border-bright);
+  color: var(--text-primary);
+}
+.regime-sel-btn.active {
+  background: rgba(59, 130, 246, 0.15);
+  border-color: var(--accent-blue);
+  color: var(--accent-blue);
+  font-weight: 600;
+}
+.regime-sel-btn[data-regime="AUTO"].active {
+  background: rgba(34, 197, 94, 0.12);
+  border-color: var(--green);
+  color: var(--green);
+}
+.regime-sel-btn[data-regime="EVENT_RISK"].active {
+  background: rgba(239, 68, 68, 0.12);
+  border-color: var(--red);
+  color: var(--red);
+}
+
+/* ============================================================
+   User Control — Exchange Mode Options
+   ============================================================ */
+.exchange-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+.exchange-option:hover {
+  border-color: var(--border-bright);
+  background: var(--bg-card-hover);
+}
+.exchange-option input[type="radio"] {
+  accent-color: var(--accent-blue);
+  width: 16px; height: 16px;
+  flex-shrink: 0;
+}
+.exchange-option.selected {
+  border-color: var(--accent-blue);
+  background: rgba(59, 130, 246, 0.08);
+}
+.exchange-option-body {
+  flex: 1;
+}
+
+/* ============================================================
+   Strategy Recommendation Cards
+   ============================================================ */
+.rec-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  margin-bottom: 10px;
+}
+.rec-card:last-child { margin-bottom: 0; }
+
+.rec-card-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.rec-type-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 20px;
+  font-family: var(--font-mono);
+  letter-spacing: .04em;
+}
+.rec-type-ACTIVATE  { background:rgba(34,197,94,.15);  color:var(--green); }
+.rec-type-PROMOTE   { background:rgba(59,130,246,.15); color:var(--accent-blue); }
+.rec-type-SUSPEND   { background:rgba(239,68,68,.15);  color:var(--red); }
+.rec-type-ADJUST    { background:rgba(245,158,11,.15); color:var(--yellow); }
+.rec-type-FOCUS     { background:rgba(139,92,246,.15); color:var(--accent-purple); }
+
+.rec-card-title {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+.rec-card-reasoning {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.55;
+  margin-bottom: 10px;
+}
+.rec-card-data {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.rec-data-item {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  background: var(--bg-secondary);
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+}
+.rec-card-actions {
+  display: flex;
+  gap: 8px;
+}
+.rec-btn-approve {
+  background: rgba(34, 197, 94, .15);
+  border: 1px solid var(--green);
+  color: var(--green);
+  padding: 5px 14px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  transition: background .15s;
+}
+.rec-btn-approve:hover { background: rgba(34, 197, 94, .25); }
+.rec-btn-reject {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  padding: 5px 14px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 12px;
+  transition: background .15s, color .15s;
+}
+.rec-btn-reject:hover { background: rgba(239,68,68,.1); color: var(--red); border-color: var(--red); }
