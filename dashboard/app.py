@@ -36,8 +36,9 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, Depends, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -81,6 +82,7 @@ def create_app(
     daily_reviewer=None,
     weekly_reviewer=None,
     engine=None,
+    approval_manager=None,
 ) -> FastAPI:
     """Factory that creates the FastAPI app with injected dependencies."""
 
@@ -89,6 +91,17 @@ def create_app(
         version="4.0.0",
         docs_url="/api/docs",
     )
+
+    # ── Write-API authentication ──────────────────────────────────────────── #
+    _api_key_header = APIKeyHeader(name="X-Dashboard-Key", auto_error=False)
+
+    async def _require_key(key: str = Depends(_api_key_header)):
+        secret = getattr(config, "dashboard_secret_key", "")
+        if not secret or secret in ("changeme", "change_me_to_a_random_secret"):
+            logger.warning("[Dashboard] dashboard_secret_key not set — write APIs are unprotected")
+            return  # backward compat: open if key not configured
+        if key != secret:
+            raise HTTPException(status_code=401, detail="Invalid or missing X-Dashboard-Key header")
 
     # Static files
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -313,7 +326,7 @@ def create_app(
     # Phase 3 — Kill Switch
     # ------------------------------------------------------------------ #
 
-    @app.post("/api/kill-switch")
+    @app.post("/api/kill-switch", dependencies=[Depends(_require_key)])
     async def api_kill_switch(request: Request):
         """Trigger the kill switch. Requires JSON body with 'reason'."""
         if kill_switch is None:
@@ -340,7 +353,7 @@ def create_app(
             "ts": int(time.time() * 1000),
         })
 
-    @app.post("/api/kill-switch/reset")
+    @app.post("/api/kill-switch/reset", dependencies=[Depends(_require_key)])
     async def api_kill_switch_reset(request: Request):
         """Reset the kill switch. Requires 'authorized_by' in body."""
         if kill_switch is None:
@@ -493,7 +506,7 @@ def create_app(
         pending = store.get_pending_recommendations()
         return JSONResponse(pending)
 
-    @app.post("/api/recommendations/{rec_id}/decide")
+    @app.post("/api/recommendations/{rec_id}/decide", dependencies=[Depends(_require_key)])
     async def api_recommendation_decide(rec_id: str, request: Request):
         """
         Approve, reject, or defer a recommendation.
@@ -523,14 +536,28 @@ def create_app(
         if not reason.strip():
             raise HTTPException(status_code=400, detail="'reason' is required")
 
-        ok = store.update_recommendation(rec_id, decision, reason, decided_by)
-        if not ok:
-            raise HTTPException(status_code=404, detail=f"Recommendation {rec_id} not found")
+        # Route through ApprovalManager when available so strategy actions are executed
+        if approval_manager is not None:
+            if decision == "APPROVED":
+                result = approval_manager.approve_recommendation(rec_id, decided_by=decided_by, reason=reason)
+            elif decision == "REJECTED":
+                result = approval_manager.reject_recommendation(rec_id, decided_by=decided_by, reason=reason)
+            else:  # DEFERRED
+                ok = store.update_recommendation(rec_id, {"status": "DEFERRED",
+                    "decided_at": int(time.time() * 1000),
+                    "decided_by": decided_by, "decision_reason": reason})
+                result = {"ok": bool(ok), "msg": "Deferred"}
+            if not result.get("ok"):
+                status_code = 404 if "찾을 수 없" in result.get("msg", "") else 400
+                raise HTTPException(status_code=status_code, detail=result.get("msg", "Failed"))
+            logger.info("Recommendation %s → %s by %s via ApprovalManager: %s",
+                        rec_id, decision, decided_by, reason[:80])
+        else:
+            ok = store.update_recommendation(rec_id, decision, reason, decided_by)
+            if not ok:
+                raise HTTPException(status_code=404, detail=f"Recommendation {rec_id} not found")
+            logger.info("Recommendation %s → %s by %s: %s", rec_id, decision, decided_by, reason[:80])
 
-        logger.info(
-            "Recommendation %s → %s by %s: %s",
-            rec_id, decision, decided_by, reason[:80],
-        )
         return JSONResponse({
             "status":     "updated",
             "id":         rec_id,
@@ -639,7 +666,7 @@ def create_app(
             "ts":              int(now * 1000),
         })
 
-    @app.post("/api/restart")
+    @app.post("/api/restart", dependencies=[Depends(_require_key)])
     async def api_restart():
         """Restart the bot process. Spawns a new process then exits."""
         import os, subprocess, threading, sys
@@ -648,13 +675,11 @@ def create_app(
 
         def _do_restart():
             time.sleep(1.5)
-            subprocess.Popen(
-                [sys.executable, "-m", "bot.main"],
-                cwd=base_dir,
-                creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
-            )
-            time.sleep(0.5)
-            os._exit(0)
+            import bot.main as _bm
+            if hasattr(_bm, "_graceful_restart"):
+                _bm._graceful_restart(base_dir)
+            else:
+                os._exit(0)
 
         threading.Thread(target=_do_restart, daemon=True).start()
         return JSONResponse({"status": "restarting", "message": "Bot will restart in ~2s"})
@@ -678,7 +703,7 @@ def create_app(
             "regime_override": store.get_regime_override() if store else None,
         })
 
-    @app.post("/api/settings")
+    @app.post("/api/settings", dependencies=[Depends(_require_key)])
     async def api_post_settings(request: Request):
         """
         Update runtime settings without restart.
@@ -1383,13 +1408,17 @@ def create_app(
         except Exception as exc:
             logger.debug("WS initial snapshot send failed: %s", exc)
 
+        loop = asyncio.get_event_loop()
         try:
             while True:
                 try:
-                    msg = await asyncio.wait_for(queue.get(), timeout=30)
+                    # queue is a stdlib thread-safe Queue; bridge to async via executor
+                    msg = await asyncio.wait_for(
+                        loop.run_in_executor(None, queue.get, True, 30),
+                        timeout=35,
+                    )
                     await websocket.send_text(msg)
-                    queue.task_done()
-                except asyncio.TimeoutError:
+                except (asyncio.TimeoutError, Exception):
                     await websocket.send_text(
                         json.dumps({"type": "ping", "ts": int(time.time() * 1000)})
                     )

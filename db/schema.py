@@ -378,6 +378,8 @@ V14_MIGRATIONS = [
     "ALTER TABLE paper_positions ADD COLUMN expiry_ts INTEGER",
     "ALTER TABLE paper_positions ADD COLUMN time_stop_policy TEXT",
     "ALTER TABLE paper_positions ADD COLUMN be_stop_activated INTEGER DEFAULT 0",
+    # image_patterns.enabled may be missing on DBs created before this column was added
+    "ALTER TABLE image_patterns ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1",
 ]
 
 

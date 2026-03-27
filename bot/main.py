@@ -54,6 +54,7 @@ from bot.strategies.strategy_recommender import StrategyRecommender
 from bot.execution.kill_switch import KillSwitch
 from bot.execution.state_machine import OrderStateMachine
 from bot.execution.risk_manager import RiskManager
+from bot.execution.portfolio_constraints import PortfolioConstraintEngine
 from bot.execution.executor import Executor
 from bot.execution.reconciler import Reconciler
 # Phase 6: Hyperliquid DEX (optional)
@@ -120,6 +121,7 @@ class Engine:
         self._kill_switch: Optional[KillSwitch] = None
         self._state_machine: Optional[OrderStateMachine] = None
         self._risk_manager: Optional[RiskManager] = None
+        self._portfolio_engine: Optional[PortfolioConstraintEngine] = None
         self._executor: Optional[Executor] = None
         self._reconciler: Optional[Reconciler] = None
 
@@ -259,6 +261,7 @@ class Engine:
 
         # 9. Phase 3: Risk Manager
         self._risk_manager = RiskManager(self._store)
+        self._portfolio_engine = PortfolioConstraintEngine(self._store)
         logger.info("RiskManager initialized.")
 
         # 10. Phase 3: Executor
@@ -352,6 +355,7 @@ class Engine:
 
         # Register OS signal handlers
         loop = asyncio.get_running_loop()
+        self._loop = loop  # store for thread-safe shutdown from _graceful_restart
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
                 loop.add_signal_handler(sig, self._handle_signal)
@@ -536,6 +540,26 @@ class Engine:
                 continue
 
             try:
+                # Portfolio constraint check (before risk check)
+                if self._portfolio_engine is not None:
+                    _live = self._store.get_open_live_positions()
+                    # Normalize BUY/SELL → LONG/SHORT for constraint engine
+                    _side_map = {"BUY": "LONG", "SELL": "SHORT"}
+                    _sig_side = _side_map.get(signal.action.upper(), signal.action.upper())
+                    _norm_pos = [
+                        {**p, "side": _side_map.get(p.get("side", "").upper(), p.get("side", ""))}
+                        for p in _live
+                    ]
+                    from collections import namedtuple as _nt
+                    _OppProxy = _nt("_OppProxy", ["side", "symbol"])
+                    _pce = self._portfolio_engine.check(_OppProxy(_sig_side, signal.symbol), _norm_pos)
+                    if not _pce.passed:
+                        logger.info(
+                            "[Engine] Portfolio constraint FAILED for %s %s: %s",
+                            signal.action, signal.symbol, _pce.reason,
+                        )
+                        continue
+
                 # Risk check
                 risk_result = self._risk_manager.check(signal, balance)
 
@@ -568,6 +592,8 @@ class Engine:
                             order_result.get("internal_order_id"),
                             order_result.get("status"),
                         )
+                        if self._portfolio_engine is not None:
+                            self._portfolio_engine.record_execution()
 
                 # Phase 6: Hyperliquid 병렬 실행 (사용자 선택 반영)
                 if exchange_mode in ("BOTH", "HYPERLIQUID_ONLY") and self._hl_executor is not None:
@@ -603,9 +629,8 @@ class Engine:
             return
         try:
             balance = await self._executor.get_account_balance()
-            if balance > 0:
-                self._store.set_account_balance(balance)
-                logger.debug("[Engine] Account balance updated: %.2f USDT", balance)
+            self._store.set_account_balance(balance)
+            logger.debug("[Engine] Account balance updated: %.2f USDT", balance)
             self._last_balance_refresh = time.time()
         except Exception as exc:
             logger.warning("[Engine] Balance refresh error: %s", exc)
@@ -742,6 +767,12 @@ class Engine:
                             cq_id   = cq["id"]
                             cq_data = cq.get("data", "")
                             cq_chat = cq.get("message", {}).get("chat", {}).get("id")
+
+                            # ── chat_id allowlist ──────────────────────────
+                            _allowed = str(self._config.telegram_chat_id).strip()
+                            if _allowed and str(cq_chat) != _allowed:
+                                await answer_callback(cq_id, "Unauthorized")
+                                continue
 
                             if cq_data.startswith("mode:"):
                                 new_mode = cq_data.split(":", 1)[1]
@@ -892,13 +923,7 @@ class Engine:
                                 base_dir = str(__import__("pathlib").Path(__file__).parent.parent)
                                 def _do_restart_cb():
                                     time.sleep(2)
-                                    subprocess.Popen(
-                                        [sys.executable, "-m", "bot.main"],
-                                        cwd=base_dir,
-                                        creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
-                                    )
-                                    time.sleep(0.5)
-                                    os._exit(0)
+                                    _graceful_restart(base_dir)
                                 __import__("threading").Thread(target=_do_restart_cb, daemon=True).start()
 
                             elif cq_data == "cmd:opportunities":
@@ -968,6 +993,12 @@ class Engine:
                         text   = raw.lower()
                         chat_id = msg.get("chat", {}).get("id")
                         parts  = raw.split()          # 원본 대소문자 유지
+
+                        # ── chat_id allowlist ──────────────────────────────
+                        _allowed = str(self._config.telegram_chat_id).strip()
+                        if _allowed and str(chat_id) != _allowed:
+                            logger.warning("[Telegram] Ignored unauthorized message from chat_id=%s", chat_id)
+                            continue
 
                         # ── /start /menu /help ────────────────────────────
                         if text in ("/help", "/start", "/menu"):
@@ -1189,13 +1220,7 @@ class Engine:
                             base_dir = str(__import__("pathlib").Path(__file__).parent.parent)
                             def _do_restart():
                                 time.sleep(2)
-                                subprocess.Popen(
-                                    [sys.executable, "-m", "bot.main"],
-                                    cwd=base_dir,
-                                    creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
-                                )
-                                time.sleep(0.5)
-                                os._exit(0)
+                                _graceful_restart(base_dir)
                             __import__("threading").Thread(target=_do_restart, daemon=True).start()
 
                         # ── /opportunities ────────────────────────────────
@@ -1457,8 +1482,8 @@ class Engine:
         while not self._shutdown_event.is_set():
             try:
                 now = datetime.now(timezone.utc)
-                minute_key_daily  = f"{now.hour:02d}:{now.minute:02d}"
-                minute_key_weekly = f"{now.weekday()}-{now.hour:02d}:{now.minute:02d}"
+                minute_key_daily  = f"{now.year}-{now.month:02d}-{now.day:02d}T{now.hour:02d}:{now.minute:02d}"
+                minute_key_weekly = f"{now.isocalendar()[0]}W{now.isocalendar()[1]}-{now.weekday()}-{now.hour:02d}:{now.minute:02d}"
 
                 # Daily review
                 daily_hour = getattr(self._config, "daily_review_hour", 22)
@@ -1525,6 +1550,7 @@ class Engine:
             daily_reviewer=self._daily_reviewer,
             weekly_reviewer=self._weekly_reviewer,
             engine=self,
+            approval_manager=self._approval_manager,
         )
 
         config = uvicorn.Config(
@@ -1550,8 +1576,34 @@ class Engine:
         )
 
 
+_running_engine: Optional["Engine"] = None
+
+
+def _graceful_restart(base_dir: str) -> None:
+    """Spawn a new bot process then trigger graceful shutdown of the current one."""
+    import subprocess as _sp
+    _sp.Popen(
+        [sys.executable, "-m", "bot.main"],
+        cwd=base_dir,
+        creationflags=getattr(_sp, "CREATE_NEW_CONSOLE", 0),
+    )
+    time.sleep(0.5)
+    global _running_engine
+    eng = _running_engine
+    if eng is not None and eng._shutdown_event is not None:
+        loop = getattr(eng, "_loop", None)
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(eng._shutdown_event.set)
+        else:
+            eng._shutdown_event.set()
+    else:
+        os._exit(0)  # fallback only
+
+
 def main() -> None:
+    global _running_engine
     engine = Engine()
+    _running_engine = engine
     try:
         asyncio.run(engine.start())
     except KeyboardInterrupt:

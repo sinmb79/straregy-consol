@@ -45,9 +45,10 @@ def _get_list(key: str, default: str = "") -> List[str]:
 
 @dataclass
 class Config:
-    # Binance (Mainnet only)
+    # Binance
     binance_api_key: str = field(default_factory=lambda: _get("BINANCE_API_KEY"))
     binance_api_secret: str = field(default_factory=lambda: _get("BINANCE_API_SECRET"))
+    binance_testnet: bool = field(default_factory=lambda: _get_bool("BINANCE_TESTNET", False))
 
     # Hyperliquid
     hyperliquid_wallet_address: str = field(default_factory=lambda: _get("HYPERLIQUID_WALLET_ADDRESS"))

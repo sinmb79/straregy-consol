@@ -58,33 +58,37 @@ class DataStore:
         self._regime_override: Optional[str] = None
 
         # WebSocket subscribers for dashboard push
-        # Each subscriber is an asyncio.Queue
-        self._subscribers: List[asyncio.Queue] = []
+        # stdlib queue.Queue is thread-safe — safe to put() from main loop,
+        # get() from the dashboard thread's event loop via run_in_executor.
+        import queue as _stdlib_queue
+        self._subscribers: List[_stdlib_queue.Queue] = []
 
     # ---------------------------------------------------------------------- #
     # Subscriber management (for dashboard WebSocket push)
     # ---------------------------------------------------------------------- #
 
-    def subscribe(self) -> asyncio.Queue:
-        """Register a new subscriber; returns a queue that receives update events."""
-        q: asyncio.Queue = asyncio.Queue(maxsize=100)
+    def subscribe(self):
+        """Register a new subscriber; returns a thread-safe Queue."""
+        import queue as _stdlib_queue
+        q: _stdlib_queue.Queue = _stdlib_queue.Queue(maxsize=100)
         self._subscribers.append(q)
         return q
 
-    def unsubscribe(self, q: asyncio.Queue) -> None:
+    def unsubscribe(self, q) -> None:
         try:
             self._subscribers.remove(q)
         except ValueError:
             pass
 
     def _broadcast(self, event_type: str, data: Any) -> None:
-        """Non-blocking broadcast to all subscribers."""
+        """Non-blocking broadcast to all subscribers (thread-safe)."""
+        import queue as _stdlib_queue
         payload = json.dumps({"type": event_type, "data": data})
         dead = []
         for q in self._subscribers:
             try:
                 q.put_nowait(payload)
-            except asyncio.QueueFull:
+            except _stdlib_queue.Full:
                 dead.append(q)
         for q in dead:
             self.unsubscribe(q)
@@ -556,8 +560,8 @@ class DataStore:
                 """
                 INSERT OR IGNORE INTO orders
                     (id, signal_id, ts, symbol, side, type, qty, price,
-                     status, filled_qty, filled_price, fee)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     status, filled_qty, filled_price, fee, strategy, regime)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     order.get("id"),
@@ -572,6 +576,8 @@ class DataStore:
                     order.get("filled_qty", 0),
                     order.get("filled_price"),
                     order.get("fee", 0),
+                    order.get("strategy"),
+                    order.get("regime"),
                 ),
             )
             self._conn.commit()
@@ -587,6 +593,7 @@ class DataStore:
         allowed_keys = {
             "status", "filled_qty", "filled_price", "fee",
             "closed_at", "close_reason", "binance_order_id",
+            "strategy", "regime", "partial_fill", "error",
         }
         fields = {k: v for k, v in updates.items() if k in allowed_keys}
         if not fields:
@@ -618,7 +625,7 @@ class DataStore:
         try:
             rows = self._conn.execute(
                 """
-                SELECT * FROM orders
+                SELECT *, price AS entry_price FROM orders
                 WHERE status IN ('MONITORING', 'FILLED', 'SL_ATTACHED', 'TP_ATTACHED',
                                  'PARTIALLY_FILLED', 'OPEN')
                 ORDER BY ts DESC

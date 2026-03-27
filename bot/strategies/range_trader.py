@@ -56,14 +56,15 @@ class RangeTraderStrategy(StrategyBase):
     regime_filter: List[str] = ["BTC_SIDEWAYS"]
 
     LOOKBACK_BARS:    int   = 24     # 범위 정의 기간
-    PROXIMITY_PCT:    float = 0.012  # 지지/저항 근접 기준 (1.2%)
-    RANGE_MIN_PCT:    float = 0.020  # 유효 박스 최소 크기 (2%)
-    RANGE_MAX_PCT:    float = 0.080  # 유효 박스 최대 크기 (8%)
+    PROXIMITY_PCT:    float = 0.010  # 지지/저항 근접 기준 (1.0%)
+    RANGE_MIN_PCT:    float = 0.025  # 유효 박스 최소 크기 (2.5%)
+    RANGE_MAX_PCT:    float = 0.060  # 유효 박스 최대 크기 (6%)
     RSI_PERIOD:       int   = 14
-    RSI_LONG_MAX:     float = 45.0   # LONG 진입 RSI 상한
-    RSI_SHORT_MIN:    float = 55.0   # SHORT 진입 RSI 하한
-    VOL_BURST_MULT:   float = 1.5    # 이 이상이면 돌파 의심 → 진입 금지
-    SL_BUFFER_PCT:    float = 0.003  # SL = 범위 외부 0.3%
+    RSI_LONG_MAX:     float = 42.0   # LONG 진입 RSI 상한 (더 엄격)
+    RSI_SHORT_MIN:    float = 58.0   # SHORT 진입 RSI 하한 (더 엄격)
+    VOL_BURST_MULT:   float = 1.3    # 이 이상이면 돌파 의심 → 진입 금지 (더 엄격)
+    SL_BUFFER_PCT:    float = 0.008  # SL = 범위 외부 0.8% (노이즈 여유)
+    MIN_RR:           float = 1.5    # 최소 손익비 1.5
     INTERVAL:         str   = "1h"
 
     def compute(self, store: "DataStore", regime: dict) -> List[Signal]:
@@ -141,7 +142,7 @@ class RangeTraderStrategy(StrategyBase):
                 tp = round(midpoint, 8)
                 sl = round(support * (1 - self.SL_BUFFER_PCT), 8)
                 rr = (tp - price_cur) / (price_cur - sl) if (price_cur - sl) > 0 else 0
-                if rr < 1.0:  # RR 1:1 미만이면 패스
+                if rr < self.MIN_RR:
                     return None
                 confidence = self._clamp(0.5 + (self.RSI_LONG_MAX - rsi_cur) / 100, 0.5, 0.85)
                 return Signal(
@@ -169,7 +170,7 @@ class RangeTraderStrategy(StrategyBase):
                 tp = round(midpoint, 8)
                 sl = round(resistance * (1 + self.SL_BUFFER_PCT), 8)
                 rr = (price_cur - tp) / (sl - price_cur) if (sl - price_cur) > 0 else 0
-                if rr < 1.0:
+                if rr < self.MIN_RR:
                     return None
                 confidence = self._clamp(0.5 + (rsi_cur - self.RSI_SHORT_MIN) / 100, 0.5, 0.85)
                 return Signal(
