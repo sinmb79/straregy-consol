@@ -326,6 +326,32 @@ CREATE INDEX IF NOT EXISTS idx_image_patterns_enabled
     ON image_patterns (enabled, created_at DESC);
 """
 
+DDL_STRATEGY_VALIDATION_LOG = """
+CREATE TABLE IF NOT EXISTS strategy_validation_log (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts                    INTEGER NOT NULL,          -- 스냅샷 시각 (unix ms)
+    strategy              TEXT    NOT NULL,
+    mode                  TEXT,                      -- PAPER | SHADOW | LIVE
+    trade_count           INTEGER DEFAULT 0,
+    win_rate              REAL,                      -- 최근 10거래 승률
+    profit_factor         REAL,                      -- recent_10_pf
+    recent_10_pf          REAL,
+    recent_20_pf          REAL,
+    expectancy            REAL,                      -- 평균 PnL
+    max_drawdown          REAL,                      -- 최대 드로다운 %
+    validation_score      INTEGER DEFAULT 0,         -- 0-100 준비도 점수
+    meets_shadow_criteria INTEGER DEFAULT 0,         -- 0|1
+    meets_live_criteria   INTEGER DEFAULT 0,         -- 0|1
+    regime_breakdown      TEXT,                      -- JSON
+    health_status         TEXT                       -- OK|WARN|PAUSE|UNKNOWN
+);
+"""
+
+DDL_STRATEGY_VALIDATION_LOG_IDX = """
+CREATE INDEX IF NOT EXISTS idx_validation_log_strategy_ts
+    ON strategy_validation_log (strategy, ts DESC);
+"""
+
 ALL_DDL = [
     DDL_CANDLES, DDL_CANDLES_IDX,
     DDL_TICKERS, DDL_TICKERS_IDX,
@@ -342,6 +368,7 @@ ALL_DDL = [
     DDL_OPERATOR_ACTIONS, DDL_OPERATOR_ACTIONS_IDX,
     DDL_TELEGRAM_EVENTS,
     DDL_IMAGE_PATTERNS, DDL_IMAGE_PATTERNS_IDX,
+    DDL_STRATEGY_VALIDATION_LOG, DDL_STRATEGY_VALIDATION_LOG_IDX,
 ]
 
 # Phase 3 migration: add new columns to existing tables
@@ -382,6 +409,9 @@ V14_MIGRATIONS = [
     "ALTER TABLE image_patterns ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1",
 ]
 
+# v1.5 migrations — Strategy Validation Log
+V15_MIGRATIONS: list = []   # new table handled via ALL_DDL; reserved for future column additions
+
 
 # --------------------------------------------------------------------------- #
 # Public helpers
@@ -415,13 +445,21 @@ def init_db(db_path: str) -> sqlite3.Connection:
     except Exception:
         pass
 
-    # Phase 3 + v1.3 + v1.4 migrations (safe — ignore errors for columns that already exist)
-    for migration in PHASE3_MIGRATIONS + V13_MIGRATIONS + V14_MIGRATIONS:
+    # Phase 3 + v1.3 + v1.4 + v1.5 migrations (safe — ignore errors for already-existing columns)
+    for migration in PHASE3_MIGRATIONS + V13_MIGRATIONS + V14_MIGRATIONS + V15_MIGRATIONS:
         try:
             cursor.execute(migration)
             conn.commit()
         except Exception:
             pass  # Column already exists — safe to ignore
+
+    # v1.5: ensure validation log table exists on older DBs
+    try:
+        cursor.executescript(DDL_STRATEGY_VALIDATION_LOG)
+        cursor.executescript(DDL_STRATEGY_VALIDATION_LOG_IDX)
+        conn.commit()
+    except Exception:
+        pass
 
     logger.info("Database initialised at %s", db_path)
     return conn

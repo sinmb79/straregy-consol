@@ -51,6 +51,7 @@ from bot.strategies.manager import StrategyManager
 from bot.strategies.approval_manager import ApprovalManager
 from bot.strategies.params_store import StrategyParamsStore
 from bot.strategies.strategy_recommender import StrategyRecommender
+from bot.strategies.validation_tracker import ValidationTracker
 from bot.execution.kill_switch import KillSwitch
 from bot.execution.state_machine import OrderStateMachine
 from bot.execution.risk_manager import RiskManager
@@ -137,6 +138,9 @@ class Engine:
 
         # Strategy Recommender (사용자에게 전략 추천 제공)
         self._strategy_recommender: Optional[StrategyRecommender] = None
+
+        # Validation Tracker (실전 진입 전 검증 데이터 축적)
+        self._validation_tracker: Optional[ValidationTracker] = None
 
         # Cloudflare Tunnel
         self._tunnel = None
@@ -237,6 +241,12 @@ class Engine:
         # Health Engine에 ApprovalManager 주입
         if self._strategy_manager.health_engine is not None:
             self._strategy_manager.health_engine.set_approval_manager(self._approval_manager)
+
+        # Validation Tracker 초기화 및 Health Engine 주입
+        self._validation_tracker = ValidationTracker(self._store)
+        if self._strategy_manager.health_engine is not None:
+            self._strategy_manager.health_engine.set_validation_tracker(self._validation_tracker)
+        logger.info("ValidationTracker initialized.")
 
         # Strategy Recommender 초기화
         self._strategy_recommender = StrategyRecommender(self._store, self._strategy_manager)
@@ -475,6 +485,7 @@ class Engine:
         if self._fast_layer is not None:
             fast = self._fast_layer.compute("BTCUSDT")
             result["fast_layer"] = fast
+            result["research_risk_checklist"] = RegimeDetector.build_research_risk_checklist(result)
             # CAUTION 이상이면 로그 경고
             if fast.get("alert_level") == "CAUTION":
                 logger.warning(
@@ -640,6 +651,7 @@ class Engine:
         텔레그램 명령어 처리 루프.
         지원 명령어: /help /status /kill /reset /mode /balance /regime
                      /positions /strategies /url /pause /resume /restart
+                     /validation
         """
         import httpx
         import os, subprocess, sys
@@ -1341,6 +1353,14 @@ class Engine:
                                 await self._telegram.send_message(txt)
                             else:
                                 await self._telegram.send_message("전략 관리자가 초기화되지 않았습니다.")
+
+                        # ── /validation ───────────────────────────────────
+                        elif text == "/validation":
+                            if self._validation_tracker is not None:
+                                report = self._validation_tracker.build_validation_report()
+                                await self._telegram.send_message(report)
+                            else:
+                                await self._telegram.send_message("검증 트래커가 초기화되지 않았습니다.")
 
                         # ── /pending ──────────────────────────────────────
                         elif text == "/pending":

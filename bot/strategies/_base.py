@@ -57,6 +57,13 @@ class Signal:
     reason:     str
     tp:         Optional[float] = None
     sl:         Optional[float] = None
+    normalized_category: Optional[str] = None
+    strategy_family: Optional[str] = None
+    failure_pattern_labels: List[str] = field(default_factory=list)
+    risk_warnings: List[str] = field(default_factory=list)
+    score_total: Optional[int] = None
+    score_breakdown: dict = field(default_factory=dict)
+    opportunity_id: Optional[str] = None
     id:         str = field(default_factory=lambda: str(uuid.uuid4()))
     ts:         int = field(default_factory=lambda: int(time.time() * 1000))
 
@@ -74,6 +81,13 @@ class Signal:
             "tp":         self.tp,
             "sl":         self.sl,
             "reason":     self.reason,
+            "normalized_category": self.normalized_category,
+            "strategy_family": self.strategy_family,
+            "failure_pattern_labels": list(self.failure_pattern_labels),
+            "risk_warnings": list(self.risk_warnings),
+            "score_total": self.score_total,
+            "score_breakdown_json": self.score_breakdown,
+            "opportunity_id": self.opportunity_id,
         }
 
 

@@ -354,12 +354,18 @@ class DataStore:
 
     def save_signal(self, signal: dict) -> None:
         """Persist a signal dict to the signals table."""
+        score_breakdown = signal.get("score_breakdown_json") or {}
+        if isinstance(score_breakdown, str):
+            score_breakdown_json = score_breakdown
+        else:
+            score_breakdown_json = json.dumps(score_breakdown)
         try:
             self._conn.execute(
                 """
                 INSERT OR IGNORE INTO signals
-                    (ts, strategy, symbol, action, mode, confidence, regime, tp, sl, reason)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (ts, strategy, symbol, action, mode, confidence, regime, tp, sl, reason,
+                     normalized_category, score_total, score_breakdown_json, opportunity_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     signal.get("ts"),
@@ -372,6 +378,10 @@ class DataStore:
                     signal.get("tp"),
                     signal.get("sl"),
                     signal.get("reason"),
+                    signal.get("normalized_category"),
+                    signal.get("score_total"),
+                    score_breakdown_json,
+                    signal.get("opportunity_id"),
                 ),
             )
             self._conn.commit()
@@ -383,14 +393,25 @@ class DataStore:
         try:
             rows = self._conn.execute(
                 """
-                SELECT ts, strategy, symbol, action, mode, confidence, regime, tp, sl, reason
+                SELECT ts, strategy, symbol, action, mode, confidence, regime, tp, sl, reason,
+                       normalized_category, score_total, score_breakdown_json, opportunity_id
                 FROM signals
                 ORDER BY ts DESC
                 LIMIT ?
                 """,
                 (limit,),
             ).fetchall()
-            return [dict(r) for r in rows]
+            result = []
+            for row in rows:
+                item = dict(row)
+                raw_breakdown = item.get("score_breakdown_json")
+                if isinstance(raw_breakdown, str) and raw_breakdown:
+                    try:
+                        item["score_breakdown_json"] = json.loads(raw_breakdown)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                result.append(item)
+            return result
         except Exception as exc:
             logger.error("SQLite signal fetch error: %s", exc)
             return []
@@ -1067,6 +1088,85 @@ class DataStore:
                     self._conn.commit()
                 except Exception as exc:
                     logger.error("SQLite strategy state update error: %s", exc)
+
+    # ---------------------------------------------------------------------- #
+    # v1.5 — Strategy Validation Log
+    # ---------------------------------------------------------------------- #
+
+    def save_validation_snapshot(self, record: dict) -> None:
+        """전략 검증 스냅샷을 strategy_validation_log 테이블에 저장."""
+        try:
+            self._conn.execute(
+                """
+                INSERT INTO strategy_validation_log
+                    (ts, strategy, mode, trade_count, win_rate,
+                     profit_factor, recent_10_pf, recent_20_pf,
+                     expectancy, max_drawdown,
+                     validation_score, meets_shadow_criteria, meets_live_criteria,
+                     regime_breakdown, health_status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.get("ts"),
+                    record.get("strategy"),
+                    record.get("mode"),
+                    record.get("trade_count", 0),
+                    record.get("win_rate"),
+                    record.get("profit_factor"),
+                    record.get("recent_10_pf"),
+                    record.get("recent_20_pf"),
+                    record.get("expectancy"),
+                    record.get("max_drawdown"),
+                    record.get("validation_score", 0),
+                    record.get("meets_shadow_criteria", 0),
+                    record.get("meets_live_criteria", 0),
+                    record.get("regime_breakdown", "{}"),
+                    record.get("health_status", "UNKNOWN"),
+                ),
+            )
+            self._conn.commit()
+        except Exception as exc:
+            logger.error("SQLite validation snapshot insert error: %s", exc)
+
+    def get_validation_snapshots(self, strategy: str, limit: int = 50) -> List[dict]:
+        """전략별 검증 스냅샷 이력 조회 (최신순)."""
+        try:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM strategy_validation_log
+                WHERE strategy = ?
+                ORDER BY ts DESC
+                LIMIT ?
+                """,
+                (strategy, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception as exc:
+            logger.error("SQLite validation snapshots fetch error: %s", exc)
+            return []
+
+    def get_latest_validation_snapshots(self) -> dict:
+        """
+        각 전략의 최신 스냅샷을 strategy명을 key로 반환.
+        Returns: {strategy_name: snapshot_dict}
+        """
+        try:
+            rows = self._conn.execute(
+                """
+                SELECT v.*
+                FROM strategy_validation_log v
+                INNER JOIN (
+                    SELECT strategy, MAX(ts) AS max_ts
+                    FROM strategy_validation_log
+                    GROUP BY strategy
+                ) latest ON v.strategy = latest.strategy AND v.ts = latest.max_ts
+                ORDER BY v.strategy
+                """,
+            ).fetchall()
+            return {row["strategy"]: dict(row) for row in rows}
+        except Exception as exc:
+            logger.error("SQLite latest validation snapshots fetch error: %s", exc)
+            return {}
 
     # ---------------------------------------------------------------------- #
     # v1.3 — Opportunities

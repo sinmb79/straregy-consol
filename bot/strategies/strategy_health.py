@@ -69,10 +69,16 @@ class StrategyHealthEngine:
         self._CHECK_INTERVAL_MS = 15 * 60 * 1000  # 15분마다 실행
         # ApprovalManager는 순환 의존 방지를 위해 외부 주입
         self._approval_manager = None
+        # ValidationTracker는 외부 주입 (circular dependency 방지)
+        self._validation_tracker = None
 
     def set_approval_manager(self, approval_manager) -> None:
         """ApprovalManager 주입 (circular dependency 방지)."""
         self._approval_manager = approval_manager
+
+    def set_validation_tracker(self, validation_tracker) -> None:
+        """ValidationTracker 주입."""
+        self._validation_tracker = validation_tracker
 
     # ---------------------------------------------------------------------- #
     # Main cycle
@@ -297,6 +303,13 @@ class StrategyHealthEngine:
                             (health.get("win_rate_10") or 0) * 100,
                             health.get("recent_mdd") or 0,
                         )
+
+        # ── ValidationTracker 스냅샷 저장 ──────────────────────────────── #
+        if self._validation_tracker is not None:
+            try:
+                self._validation_tracker.take_snapshot(name, health, current_mode)
+            except Exception as exc:
+                logger.error("[HealthEngine] ValidationTracker snapshot error for '%s': %s", name, exc)
 
         level = {"OK": "info", "WARN": "warning", "PAUSE": "warning", "UNKNOWN": "debug"}.get(health_status, "info")
         getattr(logger, level)(

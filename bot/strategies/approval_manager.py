@@ -48,6 +48,76 @@ CONFIRM_TIMEOUT_SEC = 60
 # 추천 유효 기간 (일)
 RECOMMENDATION_VALIDITY_DAYS = 7
 
+CHECKLIST_SECTIONS = (
+    "market_context",
+    "strategy_fit",
+    "risk_guards",
+    "execution_readiness",
+)
+
+
+def build_research_risk_checklist(
+    strategy: str,
+    current_mode: str = "",
+    proposed_mode: str = "",
+    supporting_data: Optional[dict] = None,
+    expected_risk: Optional[dict] = None,
+    strategy_labels: Optional[dict] = None,
+) -> dict:
+    supporting_data = supporting_data or {}
+    expected_risk = expected_risk or {}
+    strategy_labels = strategy_labels or {}
+    fast = supporting_data.get("fast_layer", {}) or {}
+    regime = supporting_data.get("regime") or supporting_data.get("bot_regime") or "UNKNOWN"
+    blockers: List[str] = []
+    warnings: List[str] = []
+
+    if regime in ("UNKNOWN", "EVENT_RISK"):
+        blockers.append(f"regime={regime}")
+    if fast.get("alert_level") == "CAUTION":
+        blockers.append("fast_layer=CAUTION")
+    elif fast.get("alert_level") == "WARN":
+        warnings.append("fast_layer=WARN")
+
+    expected_drawdown = expected_risk.get("expected_drawdown_pct")
+    if isinstance(expected_drawdown, (int, float)) and expected_drawdown >= 3.0:
+        warnings.append(f"expected_drawdown_pct={expected_drawdown}")
+
+    sections = {
+        "market_context": {
+            "status": "PASS" if regime not in ("UNKNOWN", "EVENT_RISK") else "BLOCK",
+            "items": [f"regime={regime}", f"fast_alert={fast.get('alert_level', 'NONE')}"] + [f"warning:{s}" for s in fast.get("signals", [])[:4]],
+        },
+        "strategy_fit": {
+            "status": "PASS" if strategy else "WARN",
+            "items": [
+                f"strategy={strategy or 'n/a'}",
+                f"mode={current_mode or '?'}->{proposed_mode or '?'}",
+                f"category_label={strategy_labels.get('category_label', 'n/a')}",
+                f"strategy_family={strategy_labels.get('strategy_family', 'n/a')}",
+            ],
+        },
+        "risk_guards": {
+            "status": "BLOCK" if blockers else ("WARN" if warnings else "PASS"),
+            "items": blockers + warnings + [f"rollback={supporting_data.get('rollback_condition', 'manual_review')}"],
+        },
+        "execution_readiness": {
+            "status": "PASS" if proposed_mode != "LIVE" or not blockers else "BLOCK",
+            "items": ["two_step_confirm_for_level3" if proposed_mode == "LIVE" else "paper_or_shadow_path"],
+        },
+    }
+    approval_ready = not blockers
+    return {
+        "approval_ready": approval_ready,
+        "blocking_issues": blockers,
+        "warning_issues": warnings,
+        "sections": sections,
+        "strategy_labels": strategy_labels,
+        "rapid_risk_warnings": list(dict.fromkeys(list(fast.get("warning_tags", [])) + list(fast.get("signals", [])))),
+        "summary": "PASS" if approval_ready and not warnings else ("WARN" if approval_ready else "BLOCK"),
+    }
+
+
 # 액션별 레벨 매핑
 ACTION_LEVELS: Dict[str, int] = {
     "pause_strategy":    LEVEL_1,
@@ -120,6 +190,25 @@ class ApprovalManager:
         """새 추천을 DB에 저장하고 ID를 반환."""
         rec_id = str(uuid.uuid4())
         now_ms = int(time.time() * 1000)
+        strategy_profile = self._manager.get_strategy_profile(strategy)
+        supporting_data = dict(supporting_data or {})
+        current_regime = self._store.get_regime() or {}
+        supporting_data.setdefault("regime", current_regime.get("regime"))
+        supporting_data.setdefault("bot_regime", current_regime.get("bot_regime"))
+        supporting_data.setdefault("fast_layer", current_regime.get("fast_layer", {}))
+        checklist = build_research_risk_checklist(
+            strategy=strategy,
+            current_mode=current_mode,
+            proposed_mode=proposed_mode,
+            supporting_data=supporting_data,
+            expected_risk=expected_risk,
+            strategy_labels=strategy_profile,
+        )
+        supporting_data.setdefault("review_checklist", checklist)
+        supporting_data.setdefault("strategy_profile", strategy_profile)
+        supporting_data.setdefault("rapid_risk_warnings", checklist.get("rapid_risk_warnings", []))
+        supporting_data.setdefault("rollback_condition", rollback_condition or "manual_review")
+
         record = {
             "id":                 rec_id,
             "ts":                 now_ms,
@@ -274,10 +363,14 @@ class ApprovalManager:
             validity_left = max(0, r.get("validity_days", 7) - (
                 (int(time.time() * 1000) - r.get("created_at", 0)) // 86400000
             ))
+            checklist = (r.get("supporting_data") or {}).get("review_checklist", {})
+            ck = checklist.get("summary", "N/A")
+            blockers = checklist.get("blocking_issues", [])
             lines.append(
                 f"• [{r.get('type')}] `{r.get('strategy')}` "
                 f"`{r.get('current_mode','?')}` → `{r.get('proposed_mode','?')}`\n"
-                f"  ID: `{r.get('id','')[:8]}...` | 유효: {validity_left}일 남음"
+                f"  ID: `{r.get('id','')[:8]}...` | 유효: {validity_left}일 남음 | checklist={ck}"
+                + (f"\n  blockers: {', '.join(blockers[:2])}" if blockers else "")
             )
         lines.append("\n`/approve <id>` 또는 `/reject <id>` 로 처리")
         return "\n".join(lines)

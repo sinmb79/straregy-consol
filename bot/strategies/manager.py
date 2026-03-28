@@ -55,6 +55,32 @@ ALLOWED_LIFECYCLE = {"PAPER", "SHADOW", "ACTIVE"}
 # initialize() 시 DB 상태와 무관하게 PAUSED로 고정
 LEGACY_STRATEGIES = {"ema_cross", "rsi_exhaustion", "range_breakout"}
 
+STRATEGY_FAMILY_MAP: Dict[str, str] = {
+    "overreaction_reversal": "countertrend",
+    "volatility_expansion_breakout": "expansion",
+    "early_trend_capture": "trend_following",
+    "image_pattern": "pattern_recognition",
+    "ema_cross": "trend_following",
+    "rsi_exhaustion": "countertrend",
+    "range_breakout": "expansion",
+    "bear_trend": "trend_following",
+    "range_trader": "mean_reversion",
+    "volatility_momentum": "momentum",
+}
+
+STRATEGY_FAILURE_PATTERN_MAP: Dict[str, List[str]] = {
+    "overreaction_reversal": ["trend_persistence", "crowded_catch_falling_knife"],
+    "volatility_expansion_breakout": ["false_breakout", "late_expansion_entry"],
+    "early_trend_capture": ["whipsaw_reversal", "weak_follow_through"],
+    "image_pattern": ["pattern_subjectivity", "confirmation_lag"],
+    "ema_cross": ["lagging_entry", "sideways_whipsaw"],
+    "rsi_exhaustion": ["persistent_overbought_oversold", "premature_reversal"],
+    "range_breakout": ["range_fakeout", "low_volume_break"],
+    "bear_trend": ["short_squeeze", "late_short_crowding"],
+    "range_trader": ["range_break_regime_shift", "stop_cluster_hunt"],
+    "volatility_momentum": ["volatility_compression_fakeout", "exhaustion_gap"],
+}
+
 
 class StrategyManager:
     """
@@ -122,6 +148,7 @@ class StrategyManager:
             pass
 
         for strategy in self._strategies:
+            strategy_profile = self.get_strategy_profile(strategy.name, strategy.category)
             existing = self._store.get_strategy_state(strategy.name)
             if existing is None:
                 record = {
@@ -129,7 +156,7 @@ class StrategyManager:
                     "mode":            "PAPER",
                     "category":        strategy.category,
                     "regime_filter":   json.dumps(strategy.regime_filter),
-                    "stats_json":      "{}",
+                    "stats_json":      json.dumps(strategy_profile),
                     "last_signal_ts":  None,
                     "lifecycle_stage": "paper",
                 }
@@ -138,6 +165,13 @@ class StrategyManager:
                 logger.info("[StrategyManager] Registered '%s' (PAPER)", strategy.name)
             else:
                 self._state[strategy.name] = dict(existing)
+                existing_meta = self._parse_stats_json(existing.get("stats_json"))
+                merged_meta = {**strategy_profile, **existing_meta}
+                self._state[strategy.name]["stats_json"] = json.dumps(merged_meta)
+                self._store.upsert_strategy_state({
+                    "name": strategy.name,
+                    "stats_json": self._state[strategy.name]["stats_json"],
+                })
                 logger.info(
                     "[StrategyManager] Loaded '%s' (mode=%s)",
                     strategy.name, existing.get("mode", "PAPER"),
@@ -187,6 +221,11 @@ class StrategyManager:
 
             for sig in signals:
                 sig.mode = "PAPER" if mode != "LIVE" else "LIVE"
+                sig.normalized_category = strategy.category
+                sig.strategy_family = STRATEGY_FAMILY_MAP.get(strategy.name, strategy.category)
+                sig.failure_pattern_labels = list(
+                    STRATEGY_FAILURE_PATTERN_MAP.get(strategy.name, [])
+                )
 
             # ── Opportunity 파이프라인 ─────────────────────────────────── #
             for sig in signals:
@@ -197,16 +236,24 @@ class StrategyManager:
                     if opp is None:
                         continue
                     opp = self._scorer.score(opp, regime, recent_opps)
+                    sig.normalized_category = opp.category_label
+                    sig.failure_pattern_labels = list(opp.failure_pattern_labels)
+                    sig.risk_warnings = list(opp.risk_warnings)
+                    sig.score_total = opp.score_total
+                    sig.score_breakdown = dict(opp.score_breakdown)
+                    sig.opportunity_id = opp.id
                     self._opp_queue.add(opp)
 
                     # DB 저장
                     self._store.save_opportunity(opp.to_dict())
 
                     logger.info(
-                        "[OppPipeline] %s %s %s  score=%d  status=%s",
-                        opp.symbol, opp.side, opp.category,
+                        "[OppPipeline] %s %s %s/%s score=%d status=%s flags=%s failures=%s",
+                        opp.symbol, opp.side, opp.category, opp.category_label,
                         opp.score_total,
                         "ACTIONABLE" if opp.is_actionable else ("WATCH" if opp.is_watch else "IGNORE"),
+                        opp.supervision_flags[:3],
+                        opp.failure_pattern_labels[:3],
                     )
                 except Exception as exc:
                     logger.error("[OppPipeline] Normalize/score error: %s", exc)
@@ -298,13 +345,19 @@ class StrategyManager:
         result = []
         for strategy in self._strategies:
             state = self._state.get(strategy.name, {})
+            stats_meta = self._parse_stats_json(state.get("stats_json", "{}") or "{}")
             result.append({
                 "name":           strategy.name,
                 "category":       strategy.category,
+                "category_label": stats_meta.get("category_label", strategy.category),
+                "strategy_family": stats_meta.get("strategy_family", STRATEGY_FAMILY_MAP.get(strategy.name, strategy.category)),
+                "failure_patterns": stats_meta.get("failure_patterns", []),
+                "failure_pattern_labels": stats_meta.get("failure_patterns", []),
                 "regime_filter":  strategy.regime_filter,
                 "mode":           state.get("mode", "PAPER"),
                 "last_signal_ts": state.get("last_signal_ts"),
                 "lifecycle_stage": state.get("lifecycle_stage", "paper"),
+                "supervision_stage": stats_meta.get("supervision_stage", "standard"),
                 "health_status":  state.get("health_status", "OK"),
             })
         return result
@@ -320,6 +373,41 @@ class StrategyManager:
 
     def get_bus_stats(self) -> dict:
         return self._bus.get_stats()
+
+    def get_strategy_profile(self, name: str, category: str = "") -> dict:
+        resolved_category = category or next(
+            (s.category for s in self._strategies if s.name == name),
+            "",
+        )
+        return {
+            "category_label": self._build_category_label(name, resolved_category),
+            "strategy_family": STRATEGY_FAMILY_MAP.get(name, resolved_category or "uncategorized"),
+            "failure_patterns": list(STRATEGY_FAILURE_PATTERN_MAP.get(name, [])),
+            "supervision_stage": "paper_bootstrap",
+        }
+
+    @staticmethod
+    def _parse_stats_json(raw) -> dict:
+        try:
+            return json.loads(raw) if isinstance(raw, str) else dict(raw or {})
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _build_category_label(name: str, category: str) -> str:
+        if name == "overreaction_reversal":
+            return "countertrend_reversal"
+        if name == "volatility_expansion_breakout":
+            return "range_expansion_breakout"
+        if name == "early_trend_capture":
+            return "directional_trend_follow"
+        if name == "bear_trend":
+            return "directional_bear_trend"
+        if name == "range_trader":
+            return "mean_reversion_range"
+        if name == "volatility_momentum":
+            return "volatility_momentum"
+        return category or "uncategorized"
 
 
 # --------------------------------------------------------------------------- #
@@ -340,4 +428,11 @@ def _opp_to_signal(opp: Opportunity) -> Signal:
         reason   = f"Opportunity score={opp.score_total} category={opp.category}",
         tp       = opp.tp,
         sl       = opp.sl,
+        normalized_category = opp.category_label,
+        strategy_family = opp.strategy_family,
+        failure_pattern_labels = list(opp.failure_pattern_labels),
+        risk_warnings = list(opp.risk_warnings),
+        score_total = opp.score_total,
+        score_breakdown = dict(opp.score_breakdown),
+        opportunity_id = opp.id,
     )

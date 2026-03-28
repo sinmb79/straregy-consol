@@ -52,6 +52,39 @@ REGIME_BLOCK_TABLE: Dict[str, List[str]] = {
     Regime.UNKNOWN: ["live"],            # block LIVE entries
 }
 
+REGIME_LABELS: Dict[str, str] = {
+    Regime.BTC_BULLISH: "Directional bullish trend",
+    Regime.BTC_BEARISH: "Directional bearish trend",
+    Regime.BTC_SIDEWAYS: "Range-bound consolidation",
+    Regime.ALT_ROTATION: "Alt rotation / beta expansion",
+    Regime.HIGH_VOLATILITY: "High-volatility transition",
+    Regime.LOW_VOLATILITY: "Compressed volatility",
+    Regime.EVENT_RISK: "Event-risk protection",
+    Regime.UNKNOWN: "Undetermined regime",
+}
+
+REGIME_BIAS: Dict[str, str] = {
+    Regime.BTC_BULLISH: "risk_on",
+    Regime.BTC_BEARISH: "risk_off",
+    Regime.BTC_SIDEWAYS: "neutral",
+    Regime.ALT_ROTATION: "rotation",
+    Regime.HIGH_VOLATILITY: "defensive",
+    Regime.LOW_VOLATILITY: "watch_breakout",
+    Regime.EVENT_RISK: "capital_preservation",
+    Regime.UNKNOWN: "uncertain",
+}
+
+REGIME_RISK_TAGS: Dict[str, List[str]] = {
+    Regime.BTC_BULLISH: ["trend_exhaustion_risk", "late_long_crowding"],
+    Regime.BTC_BEARISH: ["short_squeeze_risk", "capitulation_extension"],
+    Regime.BTC_SIDEWAYS: ["false_breakout_risk", "mean_reversion_noise"],
+    Regime.ALT_ROTATION: ["beta_dispersion", "rotation_whipsaw"],
+    Regime.HIGH_VOLATILITY: ["gap_risk", "slippage_risk", "fast_reversal_risk"],
+    Regime.LOW_VOLATILITY: ["breakout_failure_risk", "signal_starvation"],
+    Regime.EVENT_RISK: ["headline_gap_risk", "execution_pause"],
+    Regime.UNKNOWN: ["data_quality_risk", "classification_uncertainty"],
+}
+
 
 # --------------------------------------------------------------------------- #
 # Indicator calculation helpers
@@ -216,6 +249,71 @@ class RegimeDetector:
 
         return result
 
+    @staticmethod
+    def build_research_risk_checklist(regime_result: dict) -> dict:
+        """Build a structured pre-approval checklist for the current regime snapshot."""
+        regime = regime_result.get("regime", Regime.UNKNOWN.value)
+        fast = regime_result.get("fast_layer", {}) or {}
+        items = [
+            {
+                "code": "regime_classified",
+                "status": "PASS" if regime != Regime.UNKNOWN.value else "BLOCK",
+                "summary": f"Regime classified as {regime}",
+            },
+            {
+                "code": "entry_gate",
+                "status": "PASS" if regime_result.get("new_entry_allowed") else "BLOCK",
+                "summary": "New-entry gate open" if regime_result.get("new_entry_allowed") else "New-entry gate closed",
+            },
+        ]
+
+        atr_pct = regime_result.get("btc_atr_pct")
+        if atr_pct is not None:
+            items.append({
+                "code": "volatility_guardrail",
+                "status": "WARN" if float(atr_pct) >= 4.0 else "PASS",
+                "summary": f"BTC ATR%={float(atr_pct):.2f}",
+            })
+
+        funding = regime_result.get("funding")
+        if funding is not None:
+            items.append({
+                "code": "funding_crowding",
+                "status": "WARN" if abs(float(funding)) >= 0.0005 else "PASS",
+                "summary": f"Funding={float(funding):.6f}",
+            })
+
+        if fast:
+            fast_status = "PASS"
+            if fast.get("alert_level") == "CAUTION":
+                fast_status = "BLOCK"
+            elif fast.get("alert_level") == "WARN":
+                fast_status = "WARN"
+            items.append({
+                "code": "fast_layer",
+                "status": fast_status,
+                "summary": f"Fast-layer={fast.get('alert_level', 'NONE')}",
+                "signals": list(fast.get("signals", [])),
+                "warnings": list(fast.get("warning_tags", [])),
+            })
+
+        blocking_items = [item["code"] for item in items if item.get("status") == "BLOCK"]
+        warning_items = [item["code"] for item in items if item.get("status") == "WARN"]
+        if blocking_items:
+            risk_level = "HIGH"
+        elif warning_items:
+            risk_level = "MEDIUM"
+        else:
+            risk_level = "LOW"
+
+        return {
+            "ready_for_review": len(blocking_items) == 0,
+            "risk_level": risk_level,
+            "blocking_items": blocking_items,
+            "warning_items": warning_items,
+            "items": items,
+        }
+
     def _run_detection(self) -> dict:
         """봇 규칙 기반 레짐 계산 (오버라이드 무시)."""
         ts = int(time.time() * 1000)
@@ -333,6 +431,9 @@ class RegimeDetector:
         result = {
             "ts": ts,
             "regime": regime.value,
+            "regime_label": REGIME_LABELS.get(regime, regime.value),
+            "regime_bias": REGIME_BIAS.get(regime, "uncertain"),
+            "regime_risk_tags": REGIME_RISK_TAGS.get(regime, []),
             "allowed_strategies": REGIME_ALLOW_TABLE.get(regime, []),
             "new_entry_allowed": regime not in (Regime.EVENT_RISK, Regime.UNKNOWN),
         }
