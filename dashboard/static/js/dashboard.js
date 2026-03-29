@@ -242,6 +242,13 @@ function handleSnapshot(data) {
   if (data.exchange_ok != null) updateExchangeStatus(data.exchange_ok);
   updatePnL(data.daily_pnl, data.daily_pnl_pct);
   updateExposure(data.exposure_pct);
+  if (data.account_balance != null || data.available_balance != null) {
+    handleBalanceUpdate({
+      balance: data.account_balance,
+      available_balance: data.available_balance,
+      margin_balance: data.margin_balance,
+    });
+  }
 
   if (data.tickers) {
     Object.entries(data.tickers).forEach(([sym, t]) => {
@@ -1147,10 +1154,21 @@ async function refreshReconcileStatus() {
 
 function handleBalanceUpdate(data) {
   if (!data) return;
-  const el = $('header-balance');
-  if (el) {
-    el.textContent = data.balance != null ? `$${parseFloat(data.balance).toFixed(2)}` : '—';
-    addFlash(el);
+  const balanceEl = $('header-balance');
+  const availableEl = $('header-balance-sub');
+  if (balanceEl) {
+    balanceEl.textContent = data.balance != null ? `$${parseFloat(data.balance).toFixed(2)}` : '—';
+    addFlash(balanceEl);
+  }
+  if (availableEl) {
+    const availableText = data.available_balance != null
+      ? `$${parseFloat(data.available_balance).toFixed(2)}`
+      : '—';
+    const marginText = data.margin_balance != null
+      ? `$${parseFloat(data.margin_balance).toFixed(2)}`
+      : '—';
+    availableEl.textContent = `Avail ${availableText} · Margin ${marginText}`;
+    addFlash(availableEl);
   }
 }
 

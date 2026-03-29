@@ -6,11 +6,13 @@ All settings are read from environment variables (loaded from .env).
 import logging
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import List
 
 from dotenv import load_dotenv
 
-load_dotenv()
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(dotenv_path=_PROJECT_ROOT / ".env")
 
 logger = logging.getLogger(__name__)
 
@@ -129,10 +131,14 @@ class Config:
 
     @property
     def binance_rest_base(self) -> str:
+        if self.binance_testnet:
+            return "https://testnet.binancefuture.com"
         return "https://fapi.binance.com"
 
     @property
     def binance_ws_base(self) -> str:
+        if self.binance_testnet:
+            return "wss://stream.binancefuture.com"
         return "wss://fstream.binance.com"
 
     @property

@@ -97,6 +97,7 @@ class RiskManager:
         self,
         signal: "Signal",
         account_balance: float,
+        available_balance: Optional[float] = None,
         sl_pct: Optional[float] = None,
     ) -> RiskResult:
         """
@@ -120,6 +121,16 @@ class RiskManager:
                 passed=False,
                 reason="Account balance is zero or negative",
                 rule_failed="balance",
+                checks=checks,
+            )
+
+        tradable_balance = account_balance if available_balance is None else available_balance
+        checks["available_balance"] = round(tradable_balance, 4)
+        if tradable_balance <= 0:
+            return RiskResult(
+                passed=False,
+                reason="Available balance is zero or negative",
+                rule_failed="available_balance",
                 checks=checks,
             )
 
@@ -174,7 +185,12 @@ class RiskManager:
                 checks=checks,
             )
 
-        position_size = self.compute_position_size(signal, account_balance, computed_sl_pct)
+        position_size = self.compute_position_size(
+            signal,
+            risk_balance=tradable_balance,
+            sl_pct=computed_sl_pct,
+            exposure_balance=account_balance,
+        )
         checks["position_size"] = round(position_size, 6)
         checks["sl_pct"] = round(computed_sl_pct, 4)
 
@@ -272,31 +288,34 @@ class RiskManager:
     def compute_position_size(
         self,
         signal: "Signal",
-        balance: float,
+        risk_balance: float,
         sl_pct: float,
+        exposure_balance: Optional[float] = None,
     ) -> float:
         """
         Kelly-inspired fixed-risk sizing:
-          size_usdt = balance * MAX_TRADE_RISK / sl_pct
+          size_usdt = risk_balance * MAX_TRADE_RISK / sl_pct
           size_qty  = size_usdt / entry_price
 
         Capped by:
-          - MAX_SYMBOL_EXPOSURE: size_usdt <= balance * MAX_SYMBOL_EXPOSURE
-          - MAX_LEVERAGE: size_usdt <= balance * MAX_LEVERAGE
+          - MAX_SYMBOL_EXPOSURE: size_usdt <= exposure_balance * MAX_SYMBOL_EXPOSURE
+          - MAX_LEVERAGE: size_usdt <= exposure_balance * MAX_LEVERAGE
         """
-        if sl_pct <= 0 or balance <= 0:
+        if sl_pct <= 0 or risk_balance <= 0:
             return 0.0
+        if exposure_balance is None:
+            exposure_balance = risk_balance
 
         # Dollar risk per trade
-        risk_usdt = balance * self.max_trade_risk
+        risk_usdt = risk_balance * self.max_trade_risk
         size_usdt = risk_usdt / sl_pct
 
         # Cap by symbol exposure
-        max_size_by_exposure = balance * self.max_symbol_exposure
+        max_size_by_exposure = exposure_balance * self.max_symbol_exposure
         size_usdt = min(size_usdt, max_size_by_exposure)
 
         # Cap by leverage
-        max_size_by_leverage = balance * self.max_leverage
+        max_size_by_leverage = exposure_balance * self.max_leverage
         size_usdt = min(size_usdt, max_size_by_leverage)
 
         # Convert to quantity

@@ -467,13 +467,17 @@ def create_app(
     async def api_account():
         """Return cached account balance and P&L summary."""
         balance = store.get_account_balance()
+        available_balance = store.get_available_balance()
+        margin_balance = store.get_margin_balance()
         daily_pnl, daily_pnl_pct = store.get_daily_pnl()
         weekly_pnl = store.get_weekly_pnl()
         return JSONResponse({
-            "balance":      balance,
-            "daily_pnl":    daily_pnl,
+            "balance":       balance,
+            "available_balance": available_balance,
+            "margin_balance": margin_balance,
+            "daily_pnl":     daily_pnl,
             "daily_pnl_pct": daily_pnl_pct,
-            "weekly_pnl":   weekly_pnl,
+            "weekly_pnl":    weekly_pnl,
         })
 
     # ------------------------------------------------------------------ #

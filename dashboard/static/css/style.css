@@ -144,6 +144,12 @@ a:hover { color: var(--accent-cyan); }
   font-weight: 600;
 }
 
+.header-item-subvalue {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  margin-top: 2px;
+}
+
 /* Status badges */
 .badge {
   display: inline-flex;

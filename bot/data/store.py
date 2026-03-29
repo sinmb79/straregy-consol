@@ -50,6 +50,10 @@ class DataStore:
         self._exchange_ok: bool = False
         self._daily_pnl: float = 0.0
         self._exposure_pct: float = 0.0
+        self._account_balance: float = 0.0
+        self._available_balance: float = 0.0
+        self._margin_balance: float = 0.0
+        self._peak_balance: float = 0.0
 
         # User control settings (runtime, not persisted to DB)
         # exchange_mode: "BOTH" | "BINANCE_ONLY" | "HYPERLIQUID_ONLY"
@@ -344,6 +348,8 @@ class DataStore:
             "tickers":          self.get_all_tickers(),
             "funding":          self.get_all_funding(),
             "account_balance":  self.get_account_balance(),
+            "available_balance": self.get_available_balance(),
+            "margin_balance":   self.get_margin_balance(),
             "kill_switch":      self.get_kill_switch_status(),
             "last_reconcile":   self.get_last_reconcile(),
         }
@@ -898,13 +904,54 @@ class DataStore:
         """Return cached account balance (updated by Executor)."""
         return getattr(self, "_account_balance", 0.0)
 
+    def get_available_balance(self) -> float:
+        """Return cached available balance. Falls back to total balance if unavailable."""
+        available = getattr(self, "_available_balance", None)
+        if available is None:
+            return self.get_account_balance()
+        return available
+
+    def get_margin_balance(self) -> float:
+        """Return cached margin balance. Falls back to total balance if unavailable."""
+        margin = getattr(self, "_margin_balance", None)
+        if margin is None:
+            return self.get_account_balance()
+        return margin
+
+    def get_account_snapshot(self) -> dict:
+        return {
+            "wallet_balance": self.get_account_balance(),
+            "available_balance": self.get_available_balance(),
+            "margin_balance": self.get_margin_balance(),
+        }
+
     def set_account_balance(self, balance: float) -> None:
         """Cache account balance + update peak balance."""
-        self._account_balance = balance
+        self.set_account_snapshot(wallet_balance=balance)
+
+    def set_account_snapshot(
+        self,
+        wallet_balance: float,
+        available_balance: Optional[float] = None,
+        margin_balance: Optional[float] = None,
+    ) -> None:
+        """Cache account snapshot and keep the legacy balance field stable."""
+        self._account_balance = wallet_balance
+        self._available_balance = wallet_balance if available_balance is None else available_balance
+        self._margin_balance = wallet_balance if margin_balance is None else margin_balance
+
         current_peak = getattr(self, "_peak_balance", 0.0)
-        if balance > current_peak:
-            self._peak_balance = balance
-        self._broadcast("account_balance", {"balance": balance})
+        if wallet_balance > current_peak:
+            self._peak_balance = wallet_balance
+
+        self._broadcast(
+            "account_balance",
+            {
+                "balance": wallet_balance,
+                "available_balance": self._available_balance,
+                "margin_balance": self._margin_balance,
+            },
+        )
 
     def get_peak_balance(self) -> Optional[float]:
         return getattr(self, "_peak_balance", None)

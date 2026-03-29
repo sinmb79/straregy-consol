@@ -56,6 +56,13 @@
           —
         {% endif %}
       </span>
+      <span class="header-item-subvalue text-mono text-muted" id="header-balance-sub">
+        {% if snapshot.account_balance %}
+          Avail ${{ "%.2f"|format(snapshot.available_balance) }} · Margin ${{ "%.2f"|format(snapshot.margin_balance) }}
+        {% else %}
+          Avail — · Margin —
+        {% endif %}
+      </span>
     </div>
 
     <!-- Today P&L -->

@@ -481,14 +481,15 @@ class Executor:
 
     async def get_account_balance(self) -> float:
         """Return the USDT futures wallet balance."""
+        snapshot = await self.get_account_snapshot()
+        return snapshot.get("wallet_balance", 0.0)
+
+    async def get_account_snapshot(self) -> dict:
+        """Return wallet, available, and margin balances for the futures account."""
         try:
             result = await self._signed_get("/fapi/v2/account", {})
             self._api_failure_count = 0
-            assets = result.get("assets", [])
-            for asset in assets:
-                if asset.get("asset") == "USDT":
-                    return float(asset.get("walletBalance", 0))
-            return 0.0
+            return self._extract_account_snapshot(result)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code in (400, 401):
                 # Auth error — API key not authorized (testnet keys return 400, mainnet 401).
@@ -500,14 +501,87 @@ class Executor:
             else:
                 logger.error("[Executor] get_account_balance error: %s", exc)
                 self._handle_api_failure()
-            return self._store.get_account_balance()
+            return self._store.get_account_snapshot()
         except Exception as exc:
             if isinstance(exc, RuntimeError) and "event loop" in str(exc):
                 logger.debug("[Executor] get_account_balance skipped — cross-loop call")
-                return self._store.get_account_balance()
+                return self._store.get_account_snapshot()
             logger.error("[Executor] get_account_balance error: %s", exc)
             self._handle_api_failure()
-            return self._store.get_account_balance()
+            return self._store.get_account_snapshot()
+
+    @staticmethod
+    def _extract_account_balance(result: dict) -> float:
+        return Executor._extract_account_snapshot(result).get("wallet_balance", 0.0)
+
+    @staticmethod
+    def _extract_account_snapshot(result: dict) -> dict:
+        wallet_balance = 0.0
+        available_balance = None
+        margin_balance = None
+
+        assets = result.get("assets", [])
+        if isinstance(assets, list):
+            for asset in assets:
+                if asset.get("asset") != "USDT":
+                    continue
+                wallet_balance = Executor._first_balance_value(
+                    asset,
+                    ("walletBalance", "marginBalance", "availableBalance"),
+                    default=0.0,
+                )
+                available_balance = Executor._first_balance_value(
+                    asset,
+                    ("availableBalance", "walletBalance", "marginBalance"),
+                )
+                margin_balance = Executor._first_balance_value(
+                    asset,
+                    ("marginBalance", "walletBalance", "availableBalance"),
+                )
+                break
+
+        if wallet_balance <= 0:
+            wallet_balance = Executor._first_balance_value(
+                result,
+                ("totalWalletBalance", "totalMarginBalance", "availableBalance"),
+                default=0.0,
+            )
+        if available_balance is None:
+            available_balance = Executor._first_balance_value(
+                result,
+                ("availableBalance", "totalWalletBalance", "totalMarginBalance"),
+                default=wallet_balance,
+            )
+        if margin_balance is None:
+            margin_balance = Executor._first_balance_value(
+                result,
+                ("totalMarginBalance", "totalWalletBalance", "availableBalance"),
+                default=wallet_balance,
+            )
+
+        return {
+            "wallet_balance": wallet_balance,
+            "available_balance": available_balance,
+            "margin_balance": margin_balance,
+        }
+
+    @staticmethod
+    def _first_balance_value(result: dict, keys: tuple[str, ...], default: Optional[float] = None) -> Optional[float]:
+        """Extract a usable USDT balance from a Binance futures account payload."""
+        for key in keys:
+            value = Executor._parse_balance_value(result.get(key))
+            if value is not None:
+                return value
+        return default
+
+    @staticmethod
+    def _parse_balance_value(raw: object) -> Optional[float]:
+        if raw in (None, ""):
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
 
     # ---------------------------------------------------------------------- #
     # API failure handling

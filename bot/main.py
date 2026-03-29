@@ -105,6 +105,19 @@ def setup_logging(level: str) -> None:
     )
 
 
+def format_account_summary(
+    wallet_balance: float,
+    available_balance: Optional[float] = None,
+    margin_balance: Optional[float] = None,
+) -> str:
+    lines = [f"총잔고: `{wallet_balance:.2f} USDT`"]
+    if available_balance is not None:
+        lines.append(f"가용잔고: `{available_balance:.2f} USDT`")
+    if margin_balance is not None:
+        lines.append(f"마진잔고: `{margin_balance:.2f} USDT`")
+    return "\n".join(lines)
+
+
 class Engine:
     """Orchestrates all Phase 1 + Phase 2 + Phase 3 + Phase 4 components."""
 
@@ -537,8 +550,12 @@ class Engine:
         Only called when system_mode == ACTIVE and kill switch is NOT active.
         """
         balance = self._store.get_account_balance()
+        available_balance = self._store.get_available_balance()
         if balance <= 0:
             logger.warning("[Engine] Account balance=0 — cannot execute live signals.")
+            return
+        if available_balance <= 0:
+            logger.warning("[Engine] Available balance=0 — cannot execute live signals.")
             return
 
         for signal in signals:
@@ -572,7 +589,11 @@ class Engine:
                         continue
 
                 # Risk check
-                risk_result = self._risk_manager.check(signal, balance)
+                risk_result = self._risk_manager.check(
+                    signal,
+                    account_balance=balance,
+                    available_balance=available_balance,
+                )
 
                 if not risk_result.passed:
                     logger.info(
@@ -639,9 +660,18 @@ class Engine:
         if self._executor is None:
             return
         try:
-            balance = await self._executor.get_account_balance()
-            self._store.set_account_balance(balance)
-            logger.debug("[Engine] Account balance updated: %.2f USDT", balance)
+            snapshot = await self._executor.get_account_snapshot()
+            self._store.set_account_snapshot(
+                wallet_balance=snapshot.get("wallet_balance", 0.0),
+                available_balance=snapshot.get("available_balance"),
+                margin_balance=snapshot.get("margin_balance"),
+            )
+            logger.debug(
+                "[Engine] Account snapshot updated: wallet=%.2f available=%.2f margin=%.2f USDT",
+                snapshot.get("wallet_balance", 0.0),
+                snapshot.get("available_balance", 0.0),
+                snapshot.get("margin_balance", 0.0),
+            )
             self._last_balance_refresh = time.time()
         except Exception as exc:
             logger.warning("[Engine] Balance refresh error: %s", exc)
@@ -810,6 +840,8 @@ class Engine:
                                 ks      = self._kill_switch.get_status() if self._kill_switch else {}
                                 rec     = self._reconciler.get_status() if self._reconciler else {}
                                 balance = self._store.get_account_balance()
+                                available_balance = self._store.get_available_balance()
+                                margin_balance = self._store.get_margin_balance()
                                 mode    = self._store.get_system_mode()
                                 uptime  = int(time.time() - self._start_time)
                                 h, m_u  = divmod(uptime // 60, 60)
@@ -819,7 +851,7 @@ class Engine:
                                     f"*⚙️ 22B Engine 상태*\n\n"
                                     f"운영 모드: `{mode}`\n"
                                     f"시장 국면: `{regime}`\n"
-                                    f"잔고: `{balance:.2f} USDT`\n"
+                                    f"{format_account_summary(balance, available_balance, margin_balance)}\n"
                                     f"Kill Switch: `{'🔴 활성' if ks.get('active') else '🟢 해제'}`\n"
                                     f"업타임: `{h}시간 {m_u}분`\n"
                                     + (f"대시보드: {tunnel_url}" if tunnel_url else "")
@@ -828,13 +860,15 @@ class Engine:
                             elif cq_data == "cmd:balance":
                                 await answer_callback(cq_id)
                                 balance  = self._store.get_account_balance()
+                                available_balance = self._store.get_available_balance()
+                                margin_balance = self._store.get_margin_balance()
                                 dpnl, dp = self._store.get_daily_pnl()
                                 wpnl     = self._store.get_weekly_pnl()
                                 sign_d   = "+" if dpnl >= 0 else ""
                                 sign_w   = "+" if wpnl >= 0 else ""
                                 await self._telegram.send_message(
                                     f"*💰 잔고 현황* (실전)\n\n"
-                                    f"잔고: `{balance:.2f} USDT`\n"
+                                    f"{format_account_summary(balance, available_balance, margin_balance)}\n"
                                     f"오늘 손익: `{sign_d}{dpnl:.2f} USDT ({sign_d}{dp:.2f}%)`\n"
                                     f"이번 주 손익: `{sign_w}{wpnl:.2f} USDT`"
                                 )
@@ -1061,6 +1095,8 @@ class Engine:
                             ks      = self._kill_switch.get_status() if self._kill_switch else {}
                             rec     = self._reconciler.get_status() if self._reconciler else {}
                             balance = self._store.get_account_balance()
+                            available_balance = self._store.get_available_balance()
+                            margin_balance = self._store.get_margin_balance()
                             mode    = self._store.get_system_mode()
                             uptime  = int(time.time() - self._start_time)
                             h, m    = divmod(uptime // 60, 60)
@@ -1071,7 +1107,7 @@ class Engine:
                                 f"*⚙️ 22B Engine 상태*\n\n"
                                 f"운영 모드: `{mode}`\n"
                                 f"시장 국면: `{regime}`\n"
-                                f"잔고: `{balance:.2f} USDT`\n"
+                                f"{format_account_summary(balance, available_balance, margin_balance)}\n"
                                 f"Kill Switch: `{'🔴 활성' if ks.get('active') else '🟢 해제'}`\n"
                                 f"마지막 대조: `{rec.get('age_sec', 'N/A')}초 전`\n"
                                 f"업타임: `{h}시간 {m}분`\n"
@@ -1081,13 +1117,15 @@ class Engine:
                         # ── /balance ──────────────────────────────────────
                         elif text == "/balance":
                             balance  = self._store.get_account_balance()
+                            available_balance = self._store.get_available_balance()
+                            margin_balance = self._store.get_margin_balance()
                             dpnl, dp = self._store.get_daily_pnl()
                             wpnl     = self._store.get_weekly_pnl()
                             sign_d   = "+" if dpnl >= 0 else ""
                             sign_w   = "+" if wpnl >= 0 else ""
                             await self._telegram.send_message(
                                 f"*💰 잔고 현황* (실전)\n\n"
-                                f"잔고: `{balance:.2f} USDT`\n"
+                                f"{format_account_summary(balance, available_balance, margin_balance)}\n"
                                 f"오늘 손익: `{sign_d}{dpnl:.2f} USDT ({sign_d}{dp:.2f}%)`\n"
                                 f"이번 주 손익: `{sign_w}{wpnl:.2f} USDT`"
                             )
